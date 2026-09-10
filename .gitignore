@@ -1,0 +1,38 @@
+# Dependencies and generated builds
+node_modules/
+.npm-cache/
+dist/
+/release/
+/backups/
+/src-tauri/target/
+/src-tauri/gen/
+
+# Local tools and editor settings
+.idea/
+.vs/
+.vscode/
+.codex/
+.agents/
+.DS_Store
+Thumbs.db
+*.log
+*.tmp
+
+# Local profiles and credentials
+.env
+.env.*
+!.env.example
+mesh.dat
+*.task
+*.pfx
+*.p12
+*.pem
+*.key
+
+# Local design and browser QA captures
+/design-qa.md
+/design-comparison*.png
+/implementation-*.png
+/ui-usb-*.png
+/test-results/
+/playwright-report/

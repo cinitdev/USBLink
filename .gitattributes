@@ -1,0 +1,11 @@
+* text=auto eol=lf
+*.bat text eol=crlf
+*.exe binary
+*.dll binary
+*.sys binary
+*.png binary
+*.ico binary
+
+# These upstream assets (including the license) have embedded SHA-256 checks.
+# Preserve their exact bytes on every checkout.
+src-tauri/vendor/easytier/** -text
