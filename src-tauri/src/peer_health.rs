@@ -1,10 +1,6 @@
-use std::mem::size_of;
+use crate::presence::{self, Phase};
 use std::net::{Ipv4Addr, SocketAddr, TcpStream};
 use std::time::Duration;
-use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
-use windows_sys::Win32::NetworkManagement::IpHelper::{
-    IcmpCloseHandle, IcmpCreateFile, IcmpSendEcho, ICMP_ECHO_REPLY,
-};
 
 #[derive(Debug, PartialEq)]
 pub(crate) struct Health {
@@ -13,99 +9,82 @@ pub(crate) struct Health {
     pub(crate) problem: Option<String>,
 }
 
-fn classify(usb_ready: bool, echo_reply: bool) -> Health {
+fn classify(phase: Option<Phase>, usb_reachable: bool) -> Health {
+    let online = matches!(phase, Some(Phase::Ready | Phase::Preparing | Phase::Failed));
+    let usb_ready = phase == Some(Phase::Ready) && usb_reachable;
+    let problem = match phase {
+        None => {
+            Some("对方 USBLink 未运行或不可达，请双方更新并打开 USBLink，允许会话访问规则后重试")
+        }
+        Some(Phase::Closing) => Some("对方 USBLink 正在退出，已停止接受新连接"),
+        Some(Phase::Preparing) => Some("对方 USBLink 在线，正在清理上次的 USB 会话"),
+        Some(Phase::Failed) => Some("对方 USBLink 在线，但 USB 会话未就绪，请对方处理清理错误"),
+        Some(Phase::Ready) if !usb_reachable => {
+            Some("对方 USBLink 在线，但 USB 共享服务不可达，请对方检查共享设置")
+        }
+        Some(Phase::Ready) => None,
+    }
+    .map(str::to_string);
     Health {
-        online: usb_ready || echo_reply,
+        online,
         usb_ready,
-        problem: if usb_ready {
-            None
-        } else if echo_reply {
-            Some("电脑在线，但 USB 共享服务不可达，请检查对方的 usbipd-win 和共享设置".into())
-        } else {
-            Some("对方电脑离线或网络不可达，请确认对方已开机并加入同一连接".into())
-        },
+        problem,
     }
 }
 
-fn tcp_reachable(address: SocketAddr) -> bool {
-    TcpStream::connect_timeout(&address, Duration::from_millis(800)).is_ok()
-}
-
-fn echo_succeeded(count: u32, status: u32, address: u32, expected: u32) -> bool {
-    count > 0 && status == 0 && address == expected
-}
-
-fn echo(ip: Ipv4Addr) -> bool {
-    let handle = unsafe { IcmpCreateFile() };
-    if handle.is_null() || handle == INVALID_HANDLE_VALUE {
-        return false;
-    }
-    let request = b"USBLink presence";
-    // The address is stored in network byte order in the Win32 DWORD.
-    let address = u32::from_ne_bytes(ip.octets());
-    let bytes = size_of::<ICMP_ECHO_REPLY>() + request.len() + 8;
-    let mut buffer = vec![0u64; bytes.div_ceil(size_of::<u64>())];
-    let count = unsafe {
-        let count = IcmpSendEcho(
-            handle,
-            address,
-            request.as_ptr().cast(),
-            request.len() as u16,
-            std::ptr::null(),
-            buffer.as_mut_ptr().cast(),
-            (buffer.len() * size_of::<u64>()) as u32,
-            800,
-        );
-        IcmpCloseHandle(handle);
-        count
-    };
-    let reply = unsafe { &*buffer.as_ptr().cast::<ICMP_ECHO_REPLY>() };
-    echo_succeeded(count, reply.Status, reply.Address, address)
+fn probe_addresses(app: SocketAddr, usb: SocketAddr, key: &[u8; 32]) -> Health {
+    let phase = presence::query(app, key);
+    let usb_reachable = phase == Some(Phase::Ready)
+        && TcpStream::connect_timeout(&usb, Duration::from_millis(800)).is_ok();
+    classify(phase, usb_reachable)
 }
 
 pub(crate) fn probe(host: &str) -> Health {
     let Ok(ip) = host.parse::<Ipv4Addr>() else {
-        return classify(false, false);
+        return classify(None, false);
     };
-    let usb_ready = tcp_reachable(SocketAddr::from((ip, 3240)));
-    // A successful TCP handshake is also an online signal when ICMP is blocked.
-    classify(usb_ready, !usb_ready && echo(ip))
+    let Some(key) = crate::mesh::presence_token().ok().flatten() else {
+        return classify(None, false);
+    };
+    probe_addresses(
+        (ip, crate::device_metadata::PORT).into(),
+        (ip, 3240).into(),
+        &key,
+    )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::net::TcpListener;
+    use std::{io::Read, net::TcpListener, thread};
+
     #[test]
-    fn separates_online_computer_from_available_usb_service() {
-        assert!(classify(true, false).online);
-        assert!(classify(true, false).usb_ready);
-        assert!(classify(false, true).online);
-        assert!(!classify(false, true).usb_ready);
-        assert!(classify(false, true).problem.unwrap().contains("电脑在线"));
-        assert!(!classify(false, false).online);
-        assert!(classify(false, false)
-            .problem
-            .unwrap()
-            .contains("离线或网络不可达"));
+    fn background_usb_service_does_not_keep_a_closed_application_online() {
+        let usb = TcpListener::bind("127.0.0.1:0").unwrap();
+        let app = TcpListener::bind("127.0.0.1:0").unwrap();
+        let address = app.local_addr().unwrap();
+        let server = thread::spawn(move || {
+            let (mut stream, _) = app.accept().unwrap();
+            let mut magic = [0; 8];
+            stream.read_exact(&mut magic).unwrap();
+            presence::respond(&mut stream, &[7; 32], || Phase::Ready).unwrap();
+        });
+        let health = probe_addresses(address, usb.local_addr().unwrap(), &[7; 32]);
+        assert!(health.online && health.usb_ready);
+        server.join().unwrap();
+        let health = probe_addresses(address, usb.local_addr().unwrap(), &[7; 32]);
+        assert!(!health.online && !health.usb_ready);
     }
+
     #[test]
-    fn icmp_error_replies_and_other_hosts_cannot_report_online() {
-        assert!(!echo_succeeded(0, 0, 1, 1));
-        assert!(!echo_succeeded(1, 11003, 1, 1));
-        assert!(!echo_succeeded(1, 0, 2, 1));
-        assert!(echo_succeeded(1, 0, 1, 1));
-    }
-    #[test]
-    fn native_icmp_confirms_loopback_presence() {
-        assert!(echo(Ipv4Addr::LOCALHOST));
-    }
-    #[test]
-    fn probes_real_listener_and_detects_its_shutdown() {
-        let listener = TcpListener::bind((Ipv4Addr::LOCALHOST, 0)).unwrap();
-        let address = listener.local_addr().unwrap();
-        assert!(tcp_reachable(address));
-        drop(listener);
-        assert!(!tcp_reachable(address));
+    fn receiving_only_application_is_online_and_closing_application_is_unavailable() {
+        assert!(classify(Some(Phase::Ready), false).online);
+        assert!(!classify(Some(Phase::Ready), false).usb_ready);
+        assert!(!classify(Some(Phase::Closing), true).online);
+        assert!(!classify(None, true).online);
+        for phase in [Phase::Preparing, Phase::Failed] {
+            assert!(classify(Some(phase), true).online);
+            assert!(!classify(Some(phase), true).usb_ready);
+        }
     }
 }

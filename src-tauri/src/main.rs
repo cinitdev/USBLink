@@ -16,10 +16,12 @@ use tauri::Manager;
 mod atomic_file;
 mod attachment;
 mod connections;
+mod detachment;
 mod device_metadata;
 mod elevation;
 mod mesh;
 mod peer_health;
+mod presence;
 mod process;
 mod services;
 mod sharing_session;
@@ -209,10 +211,11 @@ fn attach_lock() -> &'static Mutex<()> {
     LOCK.get_or_init(|| Mutex::new(()))
 }
 
-fn stop_legacy_attach_attempts() {
+fn stop_legacy_attach_attempts() -> Result<(), String> {
     if let Some(executable) = find_executable("usbip.exe") {
-        let _ = run(&executable, &["attach", "--stop-all"]);
+        ensure_success(run(&executable, &["attach", "--stop-all"])?)?;
     }
+    Ok(())
 }
 
 fn bus_id_regex() -> &'static Regex {
@@ -662,19 +665,30 @@ fn repair_mesh_blocking() -> Result<mesh::MeshStatus, String> {
 }
 
 #[tauri::command]
-async fn ensure_mesh_service_current() -> Result<bool, String> {
+async fn ensure_mesh_service_current(mesh_ip: Option<String>) -> Result<bool, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock()
             .try_lock()
             .map_err(|_| "另一个 USB 或网络操作正在进行，请稍后重试".to_string())?;
-        ensure_mesh_service_current_blocking()
+        ensure_mesh_service_current_blocking(mesh_ip)
     })
     .await
     .map_err(|error| format!("后台操作失败：{error}"))?
 }
 
-fn ensure_mesh_service_current_blocking() -> Result<bool, String> {
-    mesh::ensure_service_current()
+fn ensure_mesh_service_current_blocking(mesh_ip: Option<String>) -> Result<bool, String> {
+    sharing_session::require_ready()?;
+    if let Some(ip) = &mesh_ip {
+        // Validate against the live local address, never trust a frontend supplied firewall scope.
+        if mesh::local_ip()?.as_deref() != Some(ip) {
+            return Err("本机虚拟地址已变化，请刷新后修复连接".into());
+        }
+    }
+    let changed = mesh::ensure_service_current()?;
+    if let Some(ip) = mesh_ip {
+        elevation::ensure_session_access(&ip)?;
+    }
+    Ok(changed)
 }
 
 #[tauri::command]
@@ -743,6 +757,7 @@ fn attach_devices_blocking(
     host: String,
     bus_ids: Vec<String>,
 ) -> Result<Vec<connections::AttachedDevice>, String> {
+    sharing_session::require_ready()?;
     validate_host(&host)?;
     if bus_ids.is_empty() {
         return Err("请先选择远程 USB 设备".into());
@@ -760,6 +775,7 @@ fn attach_devices_blocking(
         &host,
         &bus_ids,
         |bus_id| {
+            sharing_session::require_ready()?;
             ensure_success(run(
                 &executable,
                 &["attach", "--once", "-r", &host, "-b", bus_id],
@@ -784,8 +800,16 @@ async fn detach_all_devices() -> Result<(), String> {
 
 fn detach_all_devices_blocking() -> Result<(), String> {
     let executable = find_executable("usbip.exe").ok_or("未安装 usbip-win2")?;
-    ensure_success(run(&executable, &DETACH_ALL_ARGS)?)?;
-    Ok(())
+    if connections::list_with_timeout(Duration::from_secs(5))?.is_empty() {
+        return Ok(());
+    }
+    require_safe_usbip(&executable)?;
+    detachment::disconnect(
+        || ensure_success(run(&executable, &DETACH_ALL_ARGS)?).map(|_| ()),
+        connections::list_with_timeout,
+        Duration::from_secs(15),
+        Duration::from_millis(250),
+    )
 }
 
 fn auto_start_command(executable: &Path) -> String {
@@ -888,7 +912,7 @@ fn request_clean_exit(app: tauri::AppHandle) {
         let result = operation_lock()
             .lock()
             .map_err(|_| "USB 操作锁不可用".to_string())
-            .and_then(|_guard| sharing_session::clear_shared_devices());
+            .and_then(|_guard| sharing_session::clear_usb_session());
         if sharing_session::session().finish_close(result) {
             app.exit(0);
         } else if let Some(problem) = sharing_session::session().status().problem {
@@ -911,12 +935,6 @@ fn main() {
             return;
         }
     };
-    std::thread::spawn(|| {
-        if let Ok(_guard) = operation_lock().lock() {
-            stop_legacy_attach_attempts();
-        }
-    });
-    let _ = device_metadata::start_server();
     tauri::Builder::default()
         .setup(|_| {
             tauri::async_runtime::spawn_blocking(sharing_session::prepare);

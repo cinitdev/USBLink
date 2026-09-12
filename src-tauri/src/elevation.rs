@@ -38,6 +38,9 @@ pub enum PrivilegedTask {
     UsbAccess {
         mesh_ip: String,
     },
+    SessionAccess {
+        mesh_ip: String,
+    },
     UsbUnshare {
         usbipd: PathBuf,
         bus_id: String,
@@ -204,6 +207,7 @@ fn dispatch(task: PrivilegedTask) -> Result<(), String> {
             Ok(())
         }
         PrivilegedTask::UsbAccess { mesh_ip } => configure_usb_access(&mesh_ip),
+        PrivilegedTask::SessionAccess { mesh_ip } => configure_session_access(&mesh_ip),
         PrivilegedTask::UsbUnshare { usbipd, bus_id } => {
             ensure_success(run(&usbipd, &["unbind", "--busid", &bus_id])?)?;
             Ok(())
@@ -212,6 +216,86 @@ fn dispatch(task: PrivilegedTask) -> Result<(), String> {
             crate::sharing_session::clear_elevated(&usbipd, &guids)
         }
     }
+}
+
+const SESSION_RULE: &str = "USBLink application session";
+
+fn session_rule_matches(content: &str, mesh_ip: &str) -> bool {
+    let Ok(subnet) = crate::mesh_subnet(mesh_ip) else {
+        return false;
+    };
+    let mask_subnet = subnet.replace("/24", "/255.255.255.0");
+    content.lines().any(|line| {
+        let fields: Vec<_> = line.trim().split('|').collect();
+        let has = |value: &str| fields.iter().any(|field| field.eq_ignore_ascii_case(value));
+        has(&format!("Name={SESSION_RULE}"))
+            && has("Active=TRUE")
+            && has("Dir=In")
+            && has("Action=Allow")
+            && has("Protocol=6")
+            && has("LPort=3241")
+            && (has(&format!("LA4={mesh_ip}")) || has(&format!("LA4={mesh_ip}/255.255.255.255")))
+            && (has(&format!("RA4={subnet}")) || has(&format!("RA4={mask_subnet}")))
+    })
+}
+
+pub(crate) fn ensure_session_access(mesh_ip: &str) -> Result<(), String> {
+    crate::mesh_subnet(mesh_ip)?;
+    if session_access_current(mesh_ip)? {
+        return Ok(());
+    }
+    execute(PrivilegedTask::SessionAccess {
+        mesh_ip: mesh_ip.into(),
+    })?;
+    if !session_access_current(mesh_ip)? {
+        return Err("无法确认 USBLink 会话访问规则已启用，请修复连接".into());
+    }
+    Ok(())
+}
+
+fn session_access_current(mesh_ip: &str) -> Result<bool, String> {
+    // Firewall registry fields are stable across Windows display languages.
+    let output = run(
+        Path::new("reg.exe"),
+        &[
+            "query",
+            r"HKLM\SYSTEM\CurrentControlSet\Services\SharedAccess\Parameters\FirewallPolicy\FirewallRules",
+            "/s",
+            "/f",
+            SESSION_RULE,
+            "/d",
+        ],
+    )?;
+    Ok(output.status.success() && session_rule_matches(&crate::text(&output), mesh_ip))
+}
+
+fn configure_session_access(mesh_ip: &str) -> Result<(), String> {
+    let remote_ip = format!("remoteip={}", crate::mesh_subnet(mesh_ip)?);
+    let local_ip = format!("localip={mesh_ip}");
+    let rule = format!("name={SESSION_RULE}");
+    let _ = run(
+        Path::new("netsh.exe"),
+        &["advfirewall", "firewall", "delete", "rule", &rule],
+    );
+    ensure_success(run(
+        Path::new("netsh.exe"),
+        &[
+            "advfirewall",
+            "firewall",
+            "add",
+            "rule",
+            &rule,
+            "dir=in",
+            "action=allow",
+            "protocol=TCP",
+            "localport=3241",
+            &local_ip,
+            &remote_ip,
+            "profile=any",
+            "enable=yes",
+        ],
+    )?)
+    .map(|_| ())
 }
 
 fn configure_usb_access(mesh_ip: &str) -> Result<(), String> {
@@ -260,6 +344,21 @@ fn configure_usb_access(mesh_ip: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn session_rule_requires_enabled_inbound_tcp_and_current_mesh_scope() {
+        let rule = "v2.32|Action=Allow|Active=TRUE|Dir=In|Protocol=6|LPort=3241|LA4=10.0.0.1|RA4=10.0.0.0/255.255.255.0|Name=USBLink application session|";
+        assert!(session_rule_matches(rule, "10.0.0.1"));
+        assert!(!session_rule_matches(rule, "10.0.1.1"));
+        for (from, to) in [
+            ("Active=TRUE", "Active=FALSE"),
+            ("Dir=In", "Dir=Out"),
+            ("LPort=3241", "LPort=3240"),
+            ("Action=Allow", "Action=Block"),
+            ("RA4=10.0.0.0/255.255.255.0", "RA4=*"),
+        ] {
+            assert!(!session_rule_matches(&rule.replace(from, to), "10.0.0.1"));
+        }
+    }
 
     #[test]
     fn missing_or_unchanged_task_file_cannot_report_success() {

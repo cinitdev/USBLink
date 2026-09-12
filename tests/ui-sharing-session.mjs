@@ -11,8 +11,8 @@ await page.addInitScript(() => {
   localStorage.setItem("usblink.autoRefresh", "false");
   const device = { busId: "3-2", vidPid: "18d1:4ee7", name: "测试手机", detail: "Android", friendlyName: true, shared: true, attached: false };
   const state = window.sessionTest = {
-    calls: {}, devices: [device], phase: "starting", problem: null, deferLocal: false,
-    finishCleanup() { this.devices = this.devices.map(d => ({ ...d, shared: false, attached: false })); this.phase = "ready"; this.problem = null; },
+    calls: {}, devices: [device], mounted: [{ ...device, host: "10.126.126.2", port: 1, attached: true }], phase: "starting", problem: null, deferLocal: false,
+    finishCleanup() { this.devices = this.devices.map(d => ({ ...d, shared: false, attached: false })); this.mounted = []; this.phase = "ready"; this.problem = null; },
   };
   window.__TAURI_INTERNALS__ = { async invoke(command) {
     state.calls[command] = (state.calls[command] || 0) + 1;
@@ -28,7 +28,7 @@ await page.addInitScript(() => {
         if (state.deferLocal) { state.deferLocal = false; return new Promise(resolve => { state.finishLocal = () => resolve(snapshot); }); }
         return snapshot;
       }
-      case "list_attached_devices": return [];
+      case "list_attached_devices": return structuredClone(state.mounted);
       case "ensure_mesh_service_current": return false;
       case "ensure_usb_sharing_ready": return true;
       case "share_devices": state.devices[0].shared = true; return;
@@ -46,6 +46,7 @@ try {
   assert.equal(await check.isDisabled(), true);
   assert.equal(await share.isDisabled(), true);
   assert.equal(await page.evaluate(() => window.sessionTest.calls.ensure_usb_sharing_ready || 0), 0);
+  assert.equal(await page.evaluate(() => window.sessionTest.calls.list_attached_devices || 0), 0, "do not publish stale mounts before startup cleanup finishes");
 
   await page.evaluate(() => { const s = window.sessionTest; s.phase = "failed"; s.problem = "未能清理遗留 USB 共享：已取消管理员授权"; });
   await notice.getByText(/已取消管理员授权/).waitFor();
@@ -54,12 +55,14 @@ try {
   await mkdir("test-results", { recursive: true });
   await page.screenshot({ path: "test-results/sharing-cleanup-failed-820.png" });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
-  await page.getByRole("button", { name: "重新清理共享", exact: true }).click();
+  await page.getByRole("button", { name: "重新清理 USB", exact: true }).click();
   await page.waitForFunction(() => !!window.sessionTest.finishRetry);
   assert.equal(await check.isDisabled(), true);
   await page.evaluate(() => window.sessionTest.finishRetry());
   await notice.waitFor({ state: "detached" });
   await page.getByText("可共享", { exact: true }).waitFor();
+  await page.waitForFunction(() => window.sessionTest.calls.list_attached_devices > 0);
+  assert.equal(await page.getByRole("region", { name: "已连接到本机的 USB" }).count(), 0);
   await check.check();
   assert.equal(await share.isEnabled(), true);
   await share.click();
@@ -67,7 +70,7 @@ try {
   assert.equal(await page.evaluate(() => window.sessionTest.calls.share_devices), 1);
 
   await page.evaluate(() => { const s = window.sessionTest; s.phase = "closing"; });
-  await notice.getByText(/正在停止 USB 共享，完成后退出/).waitFor();
+  await notice.getByText(/正在停止共享并断开 USB，完成后退出/).waitFor();
   assert.equal(await check.isDisabled(), true);
   assert.equal(await share.isDisabled(), true);
   await page.evaluate(() => { const s = window.sessionTest; s.phase = "failed"; s.problem = "USB 共享尚未全部停止，程序暂未退出：已取消管理员授权"; });

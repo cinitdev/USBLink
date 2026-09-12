@@ -59,7 +59,7 @@ async function fixture(options = {}) {
           case "list_remote_devices": return [phone];
           case "list_attached_devices": return structuredClone(state.attached);
           case "ensure_mesh_service_current":
-            if (options.holdMeshCheck) return new Promise((resolve, reject) => {
+            if (options.holdMeshCheck && !state.repairedMesh) return new Promise((resolve, reject) => {
               state.finishMeshCheck = (success) => success ? resolve(false) : reject("已取消管理员授权");
             });
             return false;
@@ -68,7 +68,7 @@ async function fixture(options = {}) {
               state.finishSharingCheck = (success) => success ? resolve(true) : reject("已取消管理员授权");
             });
             return true;
-          case "repair_mesh": return structuredClone(state.mesh);
+          case "repair_mesh": state.repairedMesh = true; return structuredClone(state.mesh);
           case "repair_usb_sharing": return;
           case "join_mesh":
             state.mesh = { ...state.mesh, configured: true, running: true, networkName: "test-network", localIp: "10.126.126.1", peers: [peer], peerCount: 1 };
@@ -125,9 +125,9 @@ try {
     assert.equal(await page.evaluate(() => window.bugTest.calls.ensure_usb_sharing_ready || 0), 0);
     assert.equal(await page.getByRole("button", { name: "连接所选设备", exact: true }).isDisabled(), true);
     await page.getByRole("button", { name: "修复连接", exact: true }).click();
-    await page.locator(".mesh-summary").getByText("对方电脑在线", { exact: true }).waitFor();
+    await page.locator(".mesh-summary").getByText("对方 USBLink 在线", { exact: true }).waitFor();
     await page.waitForFunction(() => window.bugTest.calls.ensure_usb_sharing_ready === 1);
-    assert.equal(await page.evaluate(() => window.bugTest.calls.ensure_mesh_service_current), 1);
+    assert.equal(await page.evaluate(() => window.bugTest.calls.ensure_mesh_service_current), 2, "explicit repair checks the application's session access rule again");
   });
 
   await check("automatic sharing check owns the operation lock and cancellation can be repaired", { holdSharingCheck: true }, async page => {

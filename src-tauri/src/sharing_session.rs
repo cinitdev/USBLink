@@ -60,7 +60,7 @@ impl Session {
                 phase: "failed",
                 ready: false,
                 problem: Some(format!(
-                    "未能清理遗留 USB 共享：{error}。请允许管理员授权后重试。"
+                    "USB 会话准备失败：{error}。请检查组件并允许管理员授权后重试。"
                 )),
             },
         };
@@ -91,7 +91,7 @@ impl Session {
                 phase: "failed",
                 ready: false,
                 problem: Some(format!(
-                    "USB 共享尚未全部停止，程序暂未退出：{error}。请重试关闭或重新清理共享。"
+                    "USB 共享或挂载尚未全部清除，程序暂未退出：{error}。请重试关闭或重新清理。"
                 )),
             },
         };
@@ -111,7 +111,7 @@ pub(crate) fn require_ready() -> Result<(), String> {
     } else {
         Err(state
             .problem
-            .unwrap_or_else(|| "正在清理 USB 共享，请等待完成".into()))
+            .unwrap_or_else(|| "正在清理 USB 共享和挂载，请等待完成".into()))
     }
 }
 
@@ -134,10 +134,41 @@ pub(crate) fn prepare() -> Status {
         let result = operation_lock()
             .lock()
             .map_err(|_| "USB 操作锁不可用".to_string())
-            .and_then(|_guard| clear_shared_devices());
+            .and_then(|_guard| both(crate::device_metadata::start_server, clear_usb_session));
         session.finish_prepare(result);
     }
     session.status()
+}
+
+fn both(
+    first: impl FnOnce() -> Result<(), String>,
+    second: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    let first = first();
+    let second = second();
+    match (first, second) {
+        (Ok(()), Ok(())) => Ok(()),
+        (Err(error), Ok(())) | (Ok(()), Err(error)) => Err(error),
+        (Err(first), Err(second)) => Err(format!("{first}；{second}")),
+    }
+}
+
+pub(crate) fn clear_usb_session() -> Result<(), String> {
+    both(
+        || {
+            if find_executable("usbip.exe").is_none() {
+                return Ok(());
+            }
+            // Stop legacy reconnect workers before sampling or releasing ports.
+            // Still try detach and unshare if the legacy stop command fails.
+            both(
+                crate::stop_legacy_attach_attempts,
+                crate::detach_all_devices_blocking,
+            )
+            .map_err(|error| format!("断开接收端 USB 失败：{error}"))
+        },
+        || clear_shared_devices().map_err(|error| format!("撤销共享授权失败：{error}")),
+    )
 }
 
 pub(crate) fn parse_bindings(content: &str) -> Result<Vec<String>, String> {
@@ -229,6 +260,23 @@ pub(crate) fn clear_elevated(usbipd: &Path, guids: &[String]) -> Result<(), Stri
 mod tests {
     use super::*;
     use std::cell::RefCell;
+    #[test]
+    fn cleanup_always_runs_both_directions_and_preserves_both_errors() {
+        let mut called = false;
+        let error = both(
+            || Err("detach failed".into()),
+            || {
+                called = true;
+                Err("unbind failed".into())
+            },
+        )
+        .unwrap_err();
+        assert!(called);
+        assert!(error.contains("detach failed") && error.contains("unbind failed"));
+        assert!(both(|| Ok(()), || Err("unbind failed".into())).is_err());
+        assert!(both(|| Err("detach failed".into()), || Ok(())).is_err());
+        assert!(both(|| Ok(()), || Ok(())).is_ok());
+    }
     fn ids() -> Vec<String> {
         (0..6).map(|_| Uuid::new_v4().to_string()).collect()
     }

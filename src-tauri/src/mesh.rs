@@ -250,11 +250,19 @@ fn load_profile() -> Result<Option<MeshProfile>, String> {
 }
 
 pub(crate) fn device_metadata_token() -> Result<Option<[u8; 32]>, String> {
+    profile_token(b"USBLink device metadata v1\0")
+}
+
+pub(crate) fn presence_token() -> Result<Option<[u8; 32]>, String> {
+    profile_token(b"USBLink application presence v1\0")
+}
+
+fn profile_token(domain: &[u8]) -> Result<Option<[u8; 32]>, String> {
     let Some(profile) = load_profile()? else {
         return Ok(None);
     };
     let mut digest = Sha256::new();
-    digest.update(b"USBLink device metadata v1\0");
+    digest.update(domain);
     digest.update(profile.network_secret.as_bytes());
     let mut token = [0u8; 32];
     token.copy_from_slice(&digest.finalize());
@@ -648,6 +656,10 @@ pub(crate) fn require_usb_peer(host: &str) -> Result<(), String> {
             .problem
             .unwrap_or_else(|| "对方 USB 共享服务不可达".into()))
     }
+}
+
+pub(crate) fn local_ip() -> Result<Option<String>, String> {
+    Ok(parse_peers(&peer_values()?).0)
 }
 
 pub fn status(include_code: bool) -> Result<MeshStatus, String> {

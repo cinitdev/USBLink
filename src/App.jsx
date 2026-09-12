@@ -172,10 +172,10 @@ export default function App() {
     const next = await backend("list_attached_devices", {}, () => previewAttached.current);
     return resolveAttachedNames(next);
   }, [resolveAttachedNames]);
-  const attached = useAttachedDevices(readAttached, environment.usbipInstalled && environment.usbipSafe, prefs.autoRefresh);
-  const remoteRows = useMemo(() => applyAttachedState(selectedPeerIp, remoteDevices, attached.devices), [selectedPeerIp, remoteDevices, attached.devices]);
+  const attached = useAttachedDevices(readAttached, environment.usbipInstalled && environment.usbipSafe && sharingSession.ready, prefs.autoRefresh);
 
   const selectedPeer = useMemo(() => peers.find((peer) => peer.ip === selectedPeerIp) || peers[0], [peers, selectedPeerIp]);
+  const remoteRows = useMemo(() => canUsePeer(selectedPeer) ? applyAttachedState(selectedPeerIp, remoteDevices, attached.devices) : [], [selectedPeerIp, selectedPeer, remoteDevices, attached.devices]);
   const notify = useCallback((message, type = "success") => {
     window.clearTimeout(toastTimer.current);
     setToast({ message, type }); toastTimer.current = window.setTimeout(() => setToast(null), 3800);
@@ -199,7 +199,7 @@ export default function App() {
     }
     if (!next.running || !canUsePeer(knownPeers.find(peer => peer.ip === selectedIp))) {
       remoteRequest.current += 1; remotePending.current = null;
-      setRemoteSelected(new Set()); setRemoteLoading(false);
+      setRemoteDevices([]); setRemoteSelected(new Set()); setRemoteLoading(false); setRemoteProblem("");
     }
     meshIdentity.current = identity;
     if (next.configured && !relayDirty.current) setRelayDraft(next.relay || defaultRelay);
@@ -365,12 +365,12 @@ export default function App() {
   }, [page, prefs.autoRefresh, refreshLocal, refreshRemote, selectedPeerIp]);
   useEffect(() => {
     if (!nativeApp || busy || !meshReady || !mesh.configured || !mesh.networkName) return;
-    const identity = meshIdentity.current;
+    const identity = `${meshIdentity.current}|${mesh.localIp || "pending"}`;
     if (meshServiceCheckedFor.current === identity || !beginOperation("mesh-check")) return;
     // Record attempts, including cancellation, so polling never repeats a UAC prompt.
     meshServiceCheckedFor.current = identity;
     setMeshServiceReady(false);
-    backend("ensure_mesh_service_current")
+    backend("ensure_mesh_service_current", { meshIp: mesh.localIp || null })
       .then((changed) => {
         setMeshServiceReady(true); setMeshServiceProblem("");
         if (changed) notify("EasyTier 服务配置已升级，正在重新连接");
@@ -380,7 +380,7 @@ export default function App() {
         setMeshServiceProblem(message); notify(message, "error");
       })
       .finally(() => { endOperation(); refreshMesh(); });
-  }, [busy, sharingSession.ready, mesh.configured, mesh.networkName, mesh.relay, meshReady, notify, refreshMesh, beginOperation, endOperation]);
+  }, [busy, sharingSession.ready, mesh.configured, mesh.networkName, mesh.relay, mesh.localIp, meshReady, notify, refreshMesh, beginOperation, endOperation]);
   useEffect(() => {
     if (!nativeApp || busy || localProblem || !meshServiceReady || !mesh.running || !mesh.localIp || !devices.some((device) => device.shared)) return;
     const identity = `${meshIdentity.current}|${mesh.localIp}`;
@@ -578,7 +578,7 @@ export default function App() {
       <div className="network-state"><StatusDot online={displayedMesh.running} /><div><strong>{displayedMesh.problem ? "连接异常" : displayedMesh.running ? "加密网络" : mesh.configured ? "正在连接" : "尚未配对"}</strong><span>{mesh.localIp || "无需注册账号"}</span></div></div>
     </aside>
     <main className="workspace">
-      {!sharingSession.ready && <p className="usb-status-warning sharing-session-status" role="status"><ErrorCircle20Regular />{sharingSession.problem || (sharingSession.phase === "closing" ? "正在停止 USB 共享，完成后退出…" : "正在清理上次遗留的 USB 共享，请稍候…")}{sharingSession.phase === "failed" && <button className="text-action" disabled={!!busy} onClick={retrySharingCleanup}>重新清理共享</button>}</p>}
+      {!sharingSession.ready && <p className="usb-status-warning sharing-session-status" role="status"><ErrorCircle20Regular />{sharingSession.problem || (sharingSession.phase === "closing" ? "正在停止共享并断开 USB，完成后退出…" : "正在清理上次遗留的 USB 共享和挂载，请稍候…")}{sharingSession.phase === "failed" && <button className="text-action" disabled={!!busy} onClick={retrySharingCleanup}>重新清理 USB</button>}</p>}
       {page === "devices" && <DevicePage environment={environment} mesh={displayedMesh} localProblem={localProblem} sharingProblem={sharingProblem} devices={devices} selected={selected} selectedPeer={selectedPeer} peerMenu={peerMenu} setPeerMenu={setPeerMenu} peers={peers} setSelectedPeerIp={setSelectedPeerIp} toggle={toggle} setSelected={setSelected} busy={effectiveBusy} localLoading={localLoading} refresh={() => refreshLocal()} share={share} repairSharing={repairSharing} unshare={unshare} openDownload={openDownload} setPage={setPage} />}
       {page === "connections" && <ConnectionPage environment={environment} mesh={displayedMesh} createNetwork={createNetwork} joinNetwork={joinNetwork} joinCode={joinCode} setJoinCode={setJoinCode} pairingCode={pairingCode} revealAndCopyCode={revealAndCopyCode} restartNetwork={restartNetwork} repairNetwork={repairNetwork} leaveNetwork={leaveNetwork} peers={peers} selectedPeer={selectedPeer} setSelectedPeerIp={setSelectedPeerIp} peerMenu={peerMenu} setPeerMenu={setPeerMenu} devices={remoteRows} attached={attached} remoteLoading={remoteLoading} remoteProblem={remoteProblem} selected={remoteSelected} setSelected={setRemoteSelected} toggle={(id) => toggle(id, true)} busy={effectiveBusy || (!meshReady ? "initializing" : "")} refresh={() => { refreshMesh(); refreshRemote(true); attached.refresh(); }} attach={attach} stopAll={stopAll} openDownload={openDownload} />}
       {page === "settings" && <SettingsPage environment={environment} mesh={mesh} prefs={prefs} savingPreference={savingPreference} updatePreference={updatePreference} openDownload={openDownload} installingComponent={installingComponent} checkingComponents={checkingComponents} checkComponents={checkComponents} relayDraft={relayDraft} setRelayDraft={(value) => { relayDirty.current = true; setRelayDraft(value); }} saveRelay={saveRelay} busy={effectiveBusy} />}
@@ -591,7 +591,7 @@ function PageHeader({ title, subtitle, icon: Icon, onRefresh, spinning, tone = "
   return <header className="page-header"><div><h1>{title}</h1><p className={tone}><Icon />{subtitle}</p></div>{onRefresh && <button className="secondary-button" onClick={onRefresh}><ArrowClockwise20Regular className={spinning ? "spin" : ""} />刷新</button>}</header>;
 }
 function PeerPicker({ selectedPeer, peers, open, setOpen, select, compact = false }) {
-  return <div className={`peer-wrap ${compact ? "compact" : ""}`}><button className="peer-picker" onClick={() => setOpen(!open)}><Desktop20Regular /><div><strong>{selectedPeer?.name || "选择电脑"}</strong><span>{selectedPeer ? `${selectedPeer.ip} · ${selectedPeer.online ? "在线" : "离线或不可达"}` : "等待对方加入"}</span></div><StatusDot online={!!selectedPeer?.online} /><ChevronDown16Regular /></button>{open && <div className="peer-menu">{peers.length ? peers.map((peer) => <button key={peer.ip} onClick={() => { select(peer.ip); setOpen(false); }}><StatusDot online={!!peer.online} /><span><strong>{peer.name}</strong><small>{peer.ip} · {peer.online ? "在线" : "离线或不可达"}</small></span></button>) : <p>还没有发现其他 USBLink 电脑</p>}</div>}</div>;
+  return <div className={`peer-wrap ${compact ? "compact" : ""}`}><button className="peer-picker" onClick={() => setOpen(!open)}><Desktop20Regular /><div><strong>{selectedPeer?.name || "选择电脑"}</strong><span>{selectedPeer ? `${selectedPeer.ip} · ${selectedPeer.online ? "USBLink 在线" : "USBLink 未运行或不可达"}` : "等待对方加入"}</span></div><StatusDot online={!!selectedPeer?.online} /><ChevronDown16Regular /></button>{open && <div className="peer-menu">{peers.length ? peers.map((peer) => <button key={peer.ip} onClick={() => { select(peer.ip); setOpen(false); }}><StatusDot online={!!peer.online} /><span><strong>{peer.name}</strong><small>{peer.ip} · {peer.online ? "USBLink 在线" : "USBLink 未运行或不可达"}</small></span></button>) : <p>还没有发现其他 USBLink 电脑</p>}</div>}</div>;
 }
 
 function DevicePage({ environment, mesh, devices, selected, selectedPeer, peerMenu, setPeerMenu, peers, setSelectedPeerIp, toggle, setSelected, busy, localLoading, localProblem, sharingProblem, refresh, share, repairSharing, unshare, openDownload, setPage }) {
@@ -616,13 +616,13 @@ function ConnectionPage({ environment, mesh, createNetwork, joinNetwork, joinCod
   if (!mesh.configured) return <><PageHeader title="连接" subtitle={mesh.problem || "无需注册账号，使用配对码连接两台电脑"} tone={mesh.problem ? "error" : "normal"} icon={NetworkCheck20Regular} onRefresh={refresh} />{imported}<PairingSetup createNetwork={createNetwork} joinNetwork={joinNetwork} joinCode={joinCode} setJoinCode={setJoinCode} busy={busy} /></>;
   return <><PageHeader title="连接" subtitle={mesh.problem || (mesh.running ? "EasyTier 加密网络已启动" : "EasyTier 网络正在启动")} tone={mesh.problem ? "error" : "normal"} icon={mesh.problem ? ErrorCircle20Regular : NetworkCheck20Regular} onRefresh={refresh} spinning={remoteLoading} />
     <div className="connection-content">
-    <section className={`mesh-summary ${mesh.problem ? "problem" : ""}`}><div><span className="mesh-icon">{mesh.problem ? <ErrorCircle20Regular /> : <NetworkCheck20Regular />}</span><p><strong>{mesh.problem ? "连接失败" : mesh.running ? onlineCount ? "对方电脑在线" : "暂无在线电脑" : "等待网络服务"}</strong><small>{mesh.problem || (mesh.running && !onlineCount ? "配对信息已保存，等待对方上线" : mesh.localIp) || "正在分配虚拟地址"}</small></p></div><div className="mesh-meta"><span>已验证在线</span><strong>{onlineCount} 台电脑</strong></div><div className="mesh-actions">{mesh.needsRepair && <button className="primary-button compact" onClick={repairNetwork} disabled={!!busy}><ArrowClockwise20Regular />{busy === "mesh-repair" ? "正在修复…" : "修复连接"}</button>}<button className="secondary-button" onClick={revealAndCopyCode} disabled={!!busy}><Copy20Regular />复制配对码</button><button className="icon-button" title="重新启动网络" aria-label="重新启动网络" onClick={restartNetwork} disabled={!!busy}><Power20Regular /></button><button className="danger-action" onClick={leaveNetwork} disabled={!!busy}>离开连接</button></div></section>
+    <section className={`mesh-summary ${mesh.problem ? "problem" : ""}`}><div><span className="mesh-icon">{mesh.problem ? <ErrorCircle20Regular /> : <NetworkCheck20Regular />}</span><p><strong>{mesh.problem ? "连接失败" : mesh.running ? onlineCount ? "对方 USBLink 在线" : "暂无在线 USBLink" : "等待网络服务"}</strong><small>{mesh.problem || (mesh.running && !onlineCount ? "配对信息已保存，等待对方打开 USBLink" : mesh.localIp) || "正在分配虚拟地址"}</small></p></div><div className="mesh-meta"><span>应用响应已验证</span><strong>{onlineCount} 台电脑</strong></div><div className="mesh-actions">{mesh.needsRepair && <button className="primary-button compact" onClick={repairNetwork} disabled={!!busy}><ArrowClockwise20Regular />{busy === "mesh-repair" ? "正在修复…" : "修复连接"}</button>}<button className="secondary-button" onClick={revealAndCopyCode} disabled={!!busy}><Copy20Regular />复制配对码</button><button className="icon-button" title="重新启动网络" aria-label="重新启动网络" onClick={restartNetwork} disabled={!!busy}><Power20Regular /></button><button className="danger-action" onClick={leaveNetwork} disabled={!!busy}>离开连接</button></div></section>
     {pairingCode && <div className="pairing-code-band"><Key20Regular /><input aria-label="当前配对码" readOnly value={pairingCode} /><button className="text-action" disabled={!!busy} onClick={revealAndCopyCode}><Copy20Regular />复制</button></div>}
     {imported}
     <section className="remote-source"><span>设备来源</span><PeerPicker selectedPeer={selectedPeer} peers={peers} open={peerMenu} setOpen={setPeerMenu} select={setSelectedPeerIp} /></section>
-    {selectedPeer && !canUsePeer(selectedPeer) && <p className="usb-status-warning" role="status"><ErrorCircle20Regular />{selectedPeer.problem || (selectedPeer.online ? "电脑在线，但 USB 共享服务不可达" : "对方电脑离线或网络不可达，等待对方上线")}</p>}
+    {selectedPeer && !canUsePeer(selectedPeer) && <p className="usb-status-warning" role="status"><ErrorCircle20Regular />{selectedPeer.problem || (selectedPeer.online ? "USBLink 在线，但 USB 共享服务不可达" : "对方 USBLink 未运行或不可达，请双方更新并打开程序")}</p>}
     {remoteProblem && <p className="usb-status-warning" role="status"><ErrorCircle20Regular />远程设备列表暂时无法更新：{remoteProblem}</p>}
-    {!environment.usbipInstalled ? <DependencyEmpty title="远程 USB 驱动尚未安装" text="安装免费的 usbip-win2 后即可连接远程 USB。" action="打开安装页面" onClick={() => openDownload("usbip")} /> : !environment.usbipSafe ? <DependencyEmpty icon={ErrorCircle20Regular} title="远程 USB 驱动必须更新" text={environment.usbipProblem || "当前驱动存在系统崩溃风险，USBLink 已阻止连接。"} action="更新到 0.9.8.0" onClick={() => openDownload("usbip")} /> : !selectedPeer ? <DependencyEmpty icon={Copy20Regular} title="等待另一台电脑加入" text="复制配对码发给对方，对方加入后会自动出现在这里。" action="复制配对码" onClick={revealAndCopyCode} /> : <DeviceTable title="远程可用设备" remote devices={devices} selected={selected} all={all} onAll={() => setSelected(all ? new Set() : new Set(available.map((item) => item.busId)))} toggle={toggle} busy={busy} unavailable={!mesh.running || !canUsePeer(selectedPeer) || !!remoteProblem || !attached.ready || !!attached.problem} connectionKnown={attached.ready && !attached.problem && mesh.running && canUsePeer(selectedPeer)} peerProblem={!selectedPeer.online ? "对方离线或不可达" : selectedPeer.usbReady === false ? "共享服务不可达" : ""} />}
+    {!environment.usbipInstalled ? <DependencyEmpty title="远程 USB 驱动尚未安装" text="安装免费的 usbip-win2 后即可连接远程 USB。" action="打开安装页面" onClick={() => openDownload("usbip")} /> : !environment.usbipSafe ? <DependencyEmpty icon={ErrorCircle20Regular} title="远程 USB 驱动必须更新" text={environment.usbipProblem || "当前驱动存在系统崩溃风险，USBLink 已阻止连接。"} action="更新到 0.9.8.0" onClick={() => openDownload("usbip")} /> : !selectedPeer ? <DependencyEmpty icon={Copy20Regular} title="等待另一台电脑加入" text="复制配对码发给对方，对方加入后会自动出现在这里。" action="复制配对码" onClick={revealAndCopyCode} /> : <DeviceTable title="远程可用设备" remote devices={devices} selected={selected} all={all} onAll={() => setSelected(all ? new Set() : new Set(available.map((item) => item.busId)))} toggle={toggle} busy={busy} unavailable={!mesh.running || !canUsePeer(selectedPeer) || !!remoteProblem || !attached.ready || !!attached.problem} connectionKnown={attached.ready && !attached.problem && mesh.running && canUsePeer(selectedPeer)} peerProblem={!selectedPeer.online ? "对方 USBLink 未运行或不可达" : selectedPeer.usbReady === false ? "共享服务不可达" : ""} />}
     </div>
     <footer className="command-bar"><button className="text-action" onClick={stopAll} disabled={!!busy}>断开全部 USB</button><div><strong>{selected.size ? `已选择 ${selected.size} 个设备` : attached.devices.length ? (attached.problem || mountsUnavailable ? "USB 连接状态待确认" : `已连接 ${attached.devices.length} 个远程 USB`) : "选择需要连接的设备"}</strong><span>{selectedPeer ? `来自 ${selectedPeer.name}` : "等待另一台电脑"}</span></div><button className="primary-button" disabled={!mesh.running || !canUsePeer(selectedPeer) || !environment.usbipSafe || !attached.ready || !!attached.problem || !!remoteProblem || !selected.size || !selectedPeer || !!busy} onClick={attach}><PlugConnected20Regular />{busy === "attach" ? "正在连接…" : "连接所选设备"}</button></footer>
   </>;

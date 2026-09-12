@@ -37,7 +37,7 @@ try {
   const table = page.locator(".device-panel");
   const imported = page.getByRole("region", { name: "已连接到本机的 USB" });
   const attach = page.getByRole("button", { name: "连接所选设备", exact: true });
-  await page.getByText("对方电脑在线", { exact: true }).waitFor();
+  await page.getByText("对方 USBLink 在线", { exact: true }).waitFor();
   await table.getByRole("checkbox", { name: "选择 测试手机" }).check();
   assert.equal(await attach.isEnabled(), true);
   await page.evaluate(() => { window.presenceTest.deferRemote = true; });
@@ -45,24 +45,25 @@ try {
   await page.waitForFunction(() => !!window.presenceTest.finishRemote);
   // Presence must keep polling even when automatic USB device refresh is off.
   await page.evaluate(() => { const s = window.presenceTest; s.peers = [{ ...s.peer, online: false, usbReady: false, problem: "对方电脑离线或网络不可达" }]; });
-  await page.getByText("暂无在线电脑", { exact: true }).waitFor();
-  await imported.getByText("对方离线或不可达", { exact: true }).waitFor();
+  await page.getByText("暂无在线 USBLink", { exact: true }).waitFor();
+  await imported.getByText("对方 USBLink 未运行或不可达", { exact: true }).waitFor();
   assert.equal(await attach.isDisabled(), true);
   assert.equal(await table.getByText("已连接", { exact: true }).count(), 0);
-  assert.equal(await table.getByRole("checkbox", { name: "选择 测试手机" }).isChecked(), false);
+  assert.equal(await table.locator(".device-row").count(), 0, "offline exports are removed; driver mounts only remain in the mounted section");
   await page.evaluate(() => window.presenceTest.finishRemote());
   assert.equal(await attach.isDisabled(), true);
+  assert.equal(await table.locator(".device-row").count(), 0, "late discovery cannot resurrect offline exports");
   assert.equal(await table.getByText("可连接", { exact: true }).count(), 0);
 
   await page.evaluate(() => { window.presenceTest.peers = []; window.dispatchEvent(new Event("focus")); });
-  await page.getByText(/对方电脑已离线或已离开当前连接/).waitFor();
+  await page.getByText(/对方 USBLink 未运行或已离开当前连接/).waitFor();
   await page.locator(".peer-picker").getByText("HOST-PC", { exact: true }).waitFor();
   await mkdir("test-results", { recursive: true });
   await page.screenshot({ path: "test-results/peer-offline-820.png" });
   assert.equal(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth), false);
 
   await page.evaluate(() => { const s = window.presenceTest; s.peers = [{ ...s.peer, usbReady: false, problem: "电脑在线，但 USB 共享服务不可达" }]; window.dispatchEvent(new Event("focus")); });
-  await page.getByText("对方电脑在线", { exact: true }).waitFor();
+  await page.getByText("对方 USBLink 在线", { exact: true }).waitFor();
   await imported.getByText("共享服务不可达", { exact: true }).waitFor();
   assert.equal(await attach.isDisabled(), true);
   await page.evaluate(() => { const s = window.presenceTest; s.peers = [s.peer]; window.dispatchEvent(new Event("focus")); });

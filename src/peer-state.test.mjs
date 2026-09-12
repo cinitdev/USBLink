@@ -27,7 +27,7 @@ test("network changes discard remembered peers and local failure invalidates onl
 test("a driver mount record cannot make an offline computer look connected", () => {
   const device = { host: peer.ip };
   assert.equal(mountPresence(device, [peer], true), "已连接");
-  assert.equal(mountPresence(device, [{ ...peer, online: false }], true), "对方离线或不可达");
+  assert.equal(mountPresence(device, [{ ...peer, online: false }], true), "对方 USBLink 未运行或不可达");
   assert.equal(mountPresence(device, [{ ...peer, usbReady: false }], true), "共享服务不可达");
   assert.equal(mountPresence(device, [peer], false), "对方状态待确认");
   assert.equal(mountPresence(device, [], true), "对方状态待确认");
