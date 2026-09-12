@@ -4,7 +4,16 @@ export function sameDevice(left, right) {
 }
 
 export function applyAttachedState(host, devices, attached) {
-  return devices.map((device) => ({
+  // Exporters can temporarily omit an in-use device. Its confirmed local mount
+  // remains a row for this host, independently of the remote export snapshot.
+  const rows = [...devices];
+  for (const device of attached) {
+    if (device.host !== host) continue;
+    const index = rows.findIndex(row => row.busId === device.busId);
+    if (index < 0) rows.push(device);
+    else if (!sameDevice({ ...rows[index], host }, device)) rows[index] = device;
+  }
+  return rows.map((device) => ({
     ...device,
     attached: attached.some((item) => sameDevice({ ...device, host }, item)),
   }));
@@ -21,9 +30,10 @@ export function createLatestPoller(read, publish) {
   let revision = 0;
   let pending = null;
   let disposed = false;
+  let paused = false;
   return {
     refresh(force = false) {
-      if (disposed) return Promise.resolve();
+      if (disposed || paused) return Promise.resolve();
       if (pending && !force) return pending;
       const current = ++revision;
       const task = Promise.resolve().then(read).then(
@@ -34,6 +44,9 @@ export function createLatestPoller(read, publish) {
       return task;
     },
     invalidate() { revision += 1; },
+    pause() { paused = true; revision += 1; pending = null; },
+    resume() { paused = false; },
+    accept(devices) { revision += 1; if (!disposed) publish({ ok: true, devices }); },
     dispose() { disposed = true; revision += 1; },
   };
 }

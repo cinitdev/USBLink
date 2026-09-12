@@ -1,9 +1,12 @@
 use std::io::Read;
+use std::os::windows::io::AsRawHandle;
 use std::os::windows::process::CommandExt;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
 use std::thread;
 use std::time::{Duration, Instant};
+use windows_sys::Win32::Foundation::{GetLastError, ERROR_BROKEN_PIPE};
+use windows_sys::Win32::System::Pipes::PeekNamedPipe;
 
 // Drain both pipes while waiting: large stderr/stdout must not deadlock a query.
 pub(crate) fn run(executable: &Path, args: &[&str], timeout: Duration) -> Result<Output, String> {
@@ -20,6 +23,46 @@ pub(crate) fn run(executable: &Path, args: &[&str], timeout: Duration) -> Result
     })
 }
 
+fn drain_available(
+    pipe: &mut (impl Read + AsRawHandle),
+    bytes: &mut Vec<u8>,
+) -> Result<(), String> {
+    // Read only bytes already buffered. EOF can be held open indefinitely by a
+    // grandchild, so neither a reader thread join nor read_to_end is bounded.
+    let mut available = 0;
+    let ok = unsafe {
+        PeekNamedPipe(
+            pipe.as_raw_handle(),
+            std::ptr::null_mut(),
+            0,
+            std::ptr::null_mut(),
+            &mut available,
+            std::ptr::null_mut(),
+        )
+    };
+    if ok == 0 {
+        let error = unsafe { GetLastError() };
+        return if error == ERROR_BROKEN_PIPE {
+            Ok(())
+        } else {
+            Err(format!(
+                "无法读取组件输出：{}",
+                std::io::Error::from_raw_os_error(error as i32)
+            ))
+        };
+    }
+    // Bound each iteration so a continuously writing child cannot starve the timeout.
+    let mut buffer = [0u8; 65536];
+    let count = (available as usize).min(buffer.len());
+    if count > 0 {
+        let read = pipe
+            .read(&mut buffer[..count])
+            .map_err(|error| error.to_string())?;
+        bytes.extend_from_slice(&buffer[..read]);
+    }
+    Ok(())
+}
+
 fn run_command(command: &mut Command, timeout: Duration) -> Result<Output, String> {
     let mut child = command
         .stdin(Stdio::null())
@@ -29,18 +72,25 @@ fn run_command(command: &mut Command, timeout: Duration) -> Result<Output, Strin
         .map_err(|error| format!("无法启动组件：{error}"))?;
     let mut stdout = child.stdout.take().expect("piped stdout");
     let mut stderr = child.stderr.take().expect("piped stderr");
-    let out = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stdout.read_to_end(&mut bytes).map(|_| bytes)
-    });
-    let err = thread::spawn(move || {
-        let mut bytes = Vec::new();
-        stderr.read_to_end(&mut bytes).map(|_| bytes)
-    });
+    let mut out = Vec::new();
+    let mut err = Vec::new();
     let start = Instant::now();
     let status = loop {
+        if let Err(error) = drain_available(&mut stdout, &mut out)
+            .and_then(|_| drain_available(&mut stderr, &mut err))
+        {
+            break Err(error);
+        }
         match child.try_wait() {
-            Ok(Some(status)) => break Ok(status),
+            Ok(Some(status)) => {
+                // The process may have written its last bytes after the previous drain.
+                if let Err(error) = drain_available(&mut stdout, &mut out)
+                    .and_then(|_| drain_available(&mut stderr, &mut err))
+                {
+                    break Err(error);
+                }
+                break Ok(status);
+            }
             Ok(None) if start.elapsed() < timeout => thread::sleep(Duration::from_millis(20)),
             Ok(None) => {
                 break Err(format!(
@@ -55,12 +105,10 @@ fn run_command(command: &mut Command, timeout: Duration) -> Result<Output, Strin
         let _ = child.kill();
         let _ = child.wait();
     }
-    let stdout = out.join().map_err(|_| "组件输出读取任务失败".to_string());
-    let stderr = err.join().map_err(|_| "组件错误读取任务失败".to_string());
     Ok(Output {
         status: status?,
-        stdout: stdout?.map_err(|error| format!("无法读取组件输出：{error}"))?,
-        stderr: stderr?.map_err(|error| format!("无法读取组件错误：{error}"))?,
+        stdout: out,
+        stderr: err,
     })
 }
 
@@ -82,6 +130,10 @@ mod tests {
     fn child_process() {
         match std::env::var("USBLINK_PROCESS_TEST").as_deref() {
             Ok("sleep") => thread::sleep(Duration::from_secs(5)),
+            Ok("descendant") => {
+                let mut child = helper("sleep").spawn().unwrap();
+                let _ = child.wait();
+            }
             Ok("output") => {
                 std::io::stdout()
                     .write_all(&vec![b'x'; 128 * 1024])
@@ -118,5 +170,14 @@ mod tests {
     fn preserves_component_failure_status() {
         let output = run_command(&mut helper("fail"), Duration::from_secs(5)).unwrap();
         assert_eq!(output.status.code(), Some(7));
+    }
+    #[test]
+    fn timeout_does_not_wait_for_inherited_output_handles() {
+        let start = Instant::now();
+        assert!(run_command(&mut helper("descendant"), Duration::from_millis(150)).is_err());
+        assert!(
+            start.elapsed() < Duration::from_secs(3),
+            "inherited output handles defeated the timeout"
+        );
     }
 }

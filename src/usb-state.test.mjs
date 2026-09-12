@@ -18,6 +18,32 @@ test("remote discovery uses actual mount state", () => {
   assert.equal(applyAttachedState(phone.host, [phone], [])[0].attached, false);
 });
 
+test("an in-use device remains visible when omitted by the exporter", () => {
+  assert.deepEqual(applyAttachedState(phone.host, [], [phone]), [{ ...phone, attached: true }]);
+  assert.deepEqual(applyAttachedState("10.126.126.3", [], [phone]), []);
+  assert.equal(applyAttachedState(phone.host, [phone], [phone]).length, 1);
+  assert.deepEqual(applyAttachedState(phone.host, [{ ...phone, vidPid: "1234:5678" }], [phone]), [{ ...phone, attached: true }]);
+});
+
+test("a confirmed import supersedes old polls and paused refreshes cannot clear it", async () => {
+  const old = deferred(), updates = [];
+  let reads = 0;
+  const poller = createLatestPoller(() => { reads += 1; return old.promise; }, result => updates.push(result));
+  const first = poller.refresh();
+  await Promise.resolve();
+  poller.pause();
+  await poller.refresh(true);
+  poller.accept([phone]);
+  old.resolve([]);
+  await first;
+  assert.equal(reads, 1);
+  assert.deepEqual(updates, [{ ok: true, devices: [phone] }]);
+  poller.resume();
+  await poller.refresh();
+  assert.equal(reads, 2);
+  assert.deepEqual(updates.at(-1), { ok: true, devices: [] });
+});
+
 test("query failure preserves the last snapshot but marks it unconfirmed", () => {
   const state = { devices: [phone], ready: true, problem: "" };
   const failed = applySnapshot(state, { ok: false, error: "driver unavailable" });

@@ -28,14 +28,17 @@ async function fixture(options = {}) {
       mesh: { configured, running: configured, localIp: configured ? "10.126.126.1" : null, networkName: configured ? "test-network" : null, relay, peerCount: configured ? 1 : 0, peers: configured ? [peer] : [], needsRepair: false, problem: null },
       environment: { computerName: "TEST-PC", usbipdInstalled: true, usbipInstalled: true, usbipSafe: true, easytierVersion: "2.6.4", usbipVersion: "0.9.8.0" },
       failRelay: false, failAutoStart: true, deferMesh: false, deferLocal: false, holdShare: false,
+      failMesh: false, failLocal: false,
     };
     navigator.clipboard.writeText = async value => { state.clipboard = value; };
     window.__TAURI_INTERNALS__ = {
       async invoke(command, args = {}) {
         state.calls[command] = (state.calls[command] || 0) + 1;
         switch (command) {
+          case "get_sharing_session": return { phase: "ready", ready: true, problem: null };
           case "get_environment_status": return { ...state.environment, meshConfigured: state.mesh.configured };
           case "get_mesh_status": {
+            if (state.failMesh) throw "模拟网络状态查询失败";
             const snapshot = structuredClone(state.mesh);
             if (args.includeCode) snapshot.pairingCode = "test-pairing-code-" + snapshot.relay;
             if (state.deferMesh && !args.includeCode) {
@@ -45,6 +48,7 @@ async function fixture(options = {}) {
             return snapshot;
           }
           case "list_local_devices": {
+            if (state.failLocal) throw "模拟本机 USB 状态读取失败";
             const snapshot = structuredClone(state.devices);
             if (state.deferLocal) {
               state.deferLocal = false;
@@ -54,8 +58,22 @@ async function fixture(options = {}) {
           }
           case "list_remote_devices": return [phone];
           case "list_attached_devices": return structuredClone(state.attached);
-          case "ensure_mesh_service_current": return false;
-          case "ensure_usb_sharing_ready": return true;
+          case "ensure_mesh_service_current":
+            if (options.holdMeshCheck) return new Promise((resolve, reject) => {
+              state.finishMeshCheck = (success) => success ? resolve(false) : reject("已取消管理员授权");
+            });
+            return false;
+          case "ensure_usb_sharing_ready":
+            if (options.holdSharingCheck) return new Promise((resolve, reject) => {
+              state.finishSharingCheck = (success) => success ? resolve(true) : reject("已取消管理员授权");
+            });
+            return true;
+          case "repair_mesh": return structuredClone(state.mesh);
+          case "repair_usb_sharing": return;
+          case "join_mesh":
+            state.mesh = { ...state.mesh, configured: true, running: true, networkName: "test-network", localIp: "10.126.126.1", peers: [peer], peerCount: 1 };
+            return structuredClone(state.mesh);
+          case "open_dependency_download": return;
           case "change_mesh_relay":
             if (state.failRelay) throw "已取消管理员授权";
             state.mesh.relay = args.relay;
@@ -93,6 +111,94 @@ async function check(name, options, test) {
 }
 
 try {
+  await check("cancelled service check stays failed, blocks USB work and supports manual repair", { holdMeshCheck: true }, async page => {
+    await page.waitForFunction(() => !!window.bugTest.finishMeshCheck);
+    assert.equal(await page.getByRole("checkbox", { name: "选择 Redmi K40" }).isDisabled(), true);
+    await page.getByRole("button", { name: "连接", exact: true }).click();
+    assert.equal(await page.getByRole("button", { name: "离开连接", exact: true }).isDisabled(), true);
+    await page.evaluate(() => window.bugTest.finishMeshCheck(false));
+    await page.locator(".mesh-summary").getByText(/EasyTier 服务配置检查失败/).waitFor();
+    const meshReads = await page.evaluate(() => window.bugTest.calls.get_mesh_status);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.waitForFunction(reads => window.bugTest.calls.get_mesh_status > reads + 1, meshReads);
+    assert.equal(await page.evaluate(() => window.bugTest.calls.ensure_mesh_service_current), 1);
+    assert.equal(await page.evaluate(() => window.bugTest.calls.ensure_usb_sharing_ready || 0), 0);
+    assert.equal(await page.getByRole("button", { name: "连接所选设备", exact: true }).isDisabled(), true);
+    await page.getByRole("button", { name: "修复连接", exact: true }).click();
+    await page.locator(".mesh-summary").getByText("对方电脑在线", { exact: true }).waitFor();
+    await page.waitForFunction(() => window.bugTest.calls.ensure_usb_sharing_ready === 1);
+    assert.equal(await page.evaluate(() => window.bugTest.calls.ensure_mesh_service_current), 1);
+  });
+
+  await check("automatic sharing check owns the operation lock and cancellation can be repaired", { holdSharingCheck: true }, async page => {
+    await page.waitForFunction(() => !!window.bugTest.finishSharingCheck);
+    assert.equal(await page.getByRole("button", { name: "修复共享", exact: true }).isDisabled(), true);
+    assert.equal(await page.getByRole("checkbox", { name: "选择 Redmi K40" }).isDisabled(), true);
+    await page.evaluate(() => window.bugTest.finishSharingCheck(false));
+    await page.getByRole("status").getByText(/USB 共享访问规则检查失败/).waitFor();
+    const meshReads = await page.evaluate(() => window.bugTest.calls.get_mesh_status);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
+    await page.waitForFunction(reads => window.bugTest.calls.get_mesh_status > reads + 1, meshReads);
+    assert.equal(await page.evaluate(() => window.bugTest.calls.ensure_usb_sharing_ready), 1);
+    await page.getByRole("button", { name: "修复共享", exact: true }).click();
+    await page.getByText("USB 共享访问已修复", { exact: true }).waitFor();
+    assert.equal(await page.getByRole("status").count(), 0);
+  });
+
+  await check("local query failure disables stale sharing rows until a successful refresh", {}, async page => {
+    await page.getByRole("checkbox", { name: "选择 Redmi K40" }).click();
+    await page.evaluate(() => { window.bugTest.failLocal = true; });
+    await page.getByRole("button", { name: "刷新", exact: true }).click();
+    await page.getByRole("status").getByText(/本机设备状态待确认/).waitFor();
+    assert.equal(await page.getByText("状态待确认", { exact: true }).count(), 2);
+    assert.equal(await page.getByRole("button", { name: "共享所选设备", exact: true }).isDisabled(), true);
+    assert.equal(await page.getByRole("button", { name: "停止共享", exact: true }).isDisabled(), true);
+    assert.equal(await page.evaluate(() => window.bugTest.calls.share_devices || 0), 0);
+    await page.evaluate(() => { window.bugTest.failLocal = false; });
+    await page.getByRole("button", { name: "刷新", exact: true }).click();
+    await page.getByRole("status").waitFor({ state: "detached" });
+    await page.getByRole("checkbox", { name: "选择 Redmi K40" }).click();
+    assert.equal(await page.getByRole("button", { name: "共享所选设备", exact: true }).isEnabled(), true);
+  });
+
+  await check("failed mesh query marks remembered peers offline and clears selections while retaining actual USB mounts", {}, async page => {
+    await page.getByRole("button", { name: "连接", exact: true }).click();
+    await page.getByRole("checkbox", { name: "选择 Redmi K40" }).click();
+    await page.evaluate(() => {
+      window.bugTest.attached = [{ ...window.bugTest.devices[1], host: "10.126.126.2", port: 1 }];
+      window.bugTest.failMesh = true;
+    });
+    await page.getByRole("button", { name: "刷新", exact: true }).click();
+    const imported = page.getByRole("region", { name: "已连接到本机的 USB" });
+    await imported.getByText("对方状态待确认", { exact: true }).waitFor();
+    await page.locator(".peer-picker").getByText("OFFICE-PC", { exact: true }).waitFor();
+    await imported.getByText("测试串口", { exact: true }).waitFor();
+    assert.equal(await page.getByRole("button", { name: "连接所选设备", exact: true }).isDisabled(), true);
+    assert.equal(await page.evaluate(() => window.bugTest.calls.attach_devices || 0), 0);
+    await page.evaluate(() => { window.bugTest.failMesh = false; window.dispatchEvent(new Event("focus")); });
+    await imported.getByText("已连接", { exact: true }).waitFor();
+    assert.equal(await page.getByRole("checkbox", { name: "选择 Redmi K40" }).isChecked(), false);
+    assert.equal(await imported.getByText("已连接", { exact: true }).count(), 1);
+  });
+
+  await check("leaving and joining the same network resets automatic service and access checks", {}, async page => {
+    await page.waitForFunction(() => window.bugTest.calls.ensure_usb_sharing_ready === 1);
+    await page.getByRole("button", { name: "连接", exact: true }).click();
+    await page.getByRole("button", { name: "离开连接", exact: true }).click();
+    await page.getByRole("textbox", { name: "配对码", exact: true }).fill("test-code");
+    await page.getByRole("button", { name: "加入连接", exact: true }).click();
+    await page.waitForFunction(() => window.bugTest.calls.ensure_usb_sharing_ready === 2);
+    assert.equal(await page.evaluate(() => window.bugTest.calls.ensure_mesh_service_current), 2);
+  });
+
+  await check("viewing an installed component does not claim a new installation", {}, async page => {
+    await page.getByRole("button", { name: "设置", exact: true }).click();
+    await page.locator(".dependency").filter({ hasText: "usbipd-win" }).getByRole("button", { name: "查看" }).click();
+    await page.waitForFunction(() => window.bugTest.calls.open_dependency_download === 1);
+    assert.equal(await page.getByText(/已检测到 usbipd-win/).count(), 0);
+    assert.equal(await page.getByText("等待安装完成…", { exact: true }).count(), 0);
+  });
+
   await check("corrupt preferences and full storage do not crash device queries", { corrupt: true, denyWrites: true }, async page => {
     await page.getByText("Redmi K40", { exact: true }).waitFor();
     await page.getByRole("button", { name: "连接", exact: true }).click();

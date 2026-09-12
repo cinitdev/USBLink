@@ -19,7 +19,7 @@ use crate::{ensure_success, run};
 
 const TASK_ARGUMENT: &str = "--usblink-elevated-task";
 
-#[derive(Clone, Debug, Deserialize, Serialize)]
+#[derive(Clone, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum PrivilegedTask {
     MeshApply {
@@ -27,6 +27,9 @@ pub enum PrivilegedTask {
     },
     MeshRemove,
     MeshRestart,
+    MeshRestore {
+        snapshot: crate::services::Snapshot,
+    },
     UsbShare {
         usbipd: PathBuf,
         bus_ids: Vec<String>,
@@ -39,10 +42,16 @@ pub enum PrivilegedTask {
         usbipd: PathBuf,
         bus_id: String,
     },
+    UsbUnshareMany {
+        usbipd: PathBuf,
+        guids: Vec<String>,
+    },
 }
 
 #[derive(Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
 struct TaskResult {
+    completed: bool,
     error: Option<String>,
 }
 
@@ -120,7 +129,14 @@ pub fn execute(task: PrivilegedTask) -> Result<(), String> {
         .and_then(|data| serde_json::from_slice::<TaskResult>(&data).ok());
     let _ = fs::remove_file(&path);
     let exit_code = elevated?;
-    if let Some(error) = result.and_then(|value| value.error) {
+    confirm_result(exit_code, result)
+}
+
+fn confirm_result(exit_code: u32, result: Option<TaskResult>) -> Result<(), String> {
+    let result = result
+        .filter(|value| value.completed)
+        .ok_or("无法确认管理员操作结果，请刷新状态后再决定是否重试")?;
+    if let Some(error) = result.error {
         Err(error)
     } else if exit_code != 0 {
         Err(format!("管理员操作失败，退出代码 {exit_code}"))
@@ -149,6 +165,7 @@ pub fn execute_task_file(path: &Path) -> i32 {
         dispatch(task)
     })();
     let output = TaskResult {
+        completed: true,
         error: result.as_ref().err().cloned(),
     };
     if let Ok(json) = serde_json::to_vec(&output) {
@@ -168,6 +185,7 @@ fn dispatch(task: PrivilegedTask) -> Result<(), String> {
         PrivilegedTask::MeshApply { profile } => mesh::apply_service_elevated(&profile),
         PrivilegedTask::MeshRemove => mesh::remove_service_elevated(),
         PrivilegedTask::MeshRestart => mesh::restart_service_elevated(),
+        PrivilegedTask::MeshRestore { snapshot } => mesh::restore_service_elevated(&snapshot),
         PrivilegedTask::UsbShare {
             usbipd,
             bus_ids,
@@ -189,6 +207,9 @@ fn dispatch(task: PrivilegedTask) -> Result<(), String> {
         PrivilegedTask::UsbUnshare { usbipd, bus_id } => {
             ensure_success(run(&usbipd, &["unbind", "--busid", &bus_id])?)?;
             Ok(())
+        }
+        PrivilegedTask::UsbUnshareMany { usbipd, guids } => {
+            crate::sharing_session::clear_elevated(&usbipd, &guids)
         }
     }
 }
@@ -239,6 +260,36 @@ fn configure_usb_access(mesh_ip: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn missing_or_unchanged_task_file_cannot_report_success() {
+        assert!(confirm_result(0, None).is_err());
+        assert!(serde_json::from_str::<TaskResult>(r#"{"kind":"mesh_restart"}"#).is_err());
+        assert!(confirm_result(
+            0,
+            Some(TaskResult {
+                completed: false,
+                error: None
+            })
+        )
+        .is_err());
+        assert!(confirm_result(
+            0,
+            Some(TaskResult {
+                completed: true,
+                error: None
+            })
+        )
+        .is_ok());
+        assert!(confirm_result(
+            1,
+            Some(TaskResult {
+                completed: true,
+                error: None
+            })
+        )
+        .is_err());
+    }
 
     #[test]
     fn privileged_tasks_do_not_embed_shell_commands() {

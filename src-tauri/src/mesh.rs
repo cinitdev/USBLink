@@ -14,6 +14,7 @@ use windows_sys::Win32::Security::Cryptography::{
 };
 
 use crate::elevation::{self, PrivilegedTask};
+use crate::{atomic_file::StagedFile, services};
 use crate::{ensure_success, run};
 
 pub const EASYTIER_VERSION: &str = "2.6.4";
@@ -81,6 +82,8 @@ pub struct MeshPeer {
     pub name: String,
     pub ip: String,
     pub online: bool,
+    pub usb_ready: bool,
+    pub problem: Option<String>,
     pub os: String,
     pub latency: String,
     pub tunnel: String,
@@ -227,7 +230,7 @@ fn save_profile(profile: &MeshProfile) -> Result<(), String> {
         fs::create_dir_all(parent).map_err(|error| format!("无法创建配置目录：{error}"))?;
     }
     let json = serde_json::to_vec(profile).map_err(|error| format!("无法保存配对信息：{error}"))?;
-    fs::write(path, protect(&json)?).map_err(|error| format!("无法写入配对信息：{error}"))
+    StagedFile::prepare(&path, &protect(&json)?)?.commit()
 }
 
 fn load_profile() -> Result<Option<MeshProfile>, String> {
@@ -240,8 +243,9 @@ fn load_profile() -> Result<Option<MeshProfile>, String> {
         return Ok(None);
     }
     let encrypted = fs::read(path).map_err(|error| format!("无法读取配对信息：{error}"))?;
-    let profile = serde_json::from_slice(&unprotect(&encrypted)?)
+    let profile: MeshProfile = serde_json::from_slice(&unprotect(&encrypted)?)
         .map_err(|error| format!("配对信息已损坏：{error}"))?;
+    validate_profile(&profile)?;
     Ok(Some(profile))
 }
 
@@ -374,14 +378,15 @@ pub fn ensure_service_current() -> Result<bool, String> {
     let Some(mut profile) = load_profile()? else {
         return Ok(false);
     };
-    if migrate_legacy_relay(&mut profile) {
-        save_profile(&profile)?;
-    }
+    let migrated = migrate_legacy_relay(&mut profile);
     let output = run(Path::new("sc.exe"), &["qc", SERVICE_NAME])?;
     if output.status.success() && service_configuration_matches(&crate::text(&output), &profile) {
+        if migrated {
+            save_profile(&profile)?;
+        }
         return Ok(false);
     }
-    install_service(&profile)?;
+    apply_profile(&profile)?;
     Ok(true)
 }
 
@@ -406,15 +411,35 @@ fn service_prefix(action: &str) -> Vec<String> {
 
 pub(crate) fn apply_service_elevated(profile: &MeshProfile) -> Result<(), String> {
     validate_profile(profile)?;
+    let previous = services::snapshot(SERVICE_NAME)?;
+    services::stop_and_wait(SERVICE_NAME)?;
+    restore_after_failure(
+        || {
+            write_service_configuration(profile)?;
+            services::start(SERVICE_NAME)
+        },
+        || restore_service_elevated(&previous),
+    )
+}
+
+pub(crate) fn restore_service_elevated(snapshot: &services::Snapshot) -> Result<(), String> {
+    if let Some(configuration) = &snapshot.configuration {
+        services::restore(SERVICE_NAME, configuration)?;
+        if snapshot.was_running {
+            services::start(SERVICE_NAME)?;
+        }
+        Ok(())
+    } else {
+        remove_service_elevated()
+    }
+}
+
+// EasyTier 2.6.4's Windows installer updates an existing service in place.
+fn write_service_configuration(profile: &MeshProfile) -> Result<(), String> {
     let directory = ensure_assets()?;
     let cli = directory.join("easytier-cli.exe");
     let core = directory.join("easytier-core.exe");
     let hostname = env::var("COMPUTERNAME").unwrap_or_else(|_| "USBLink-PC".into());
-    let status = run_owned(&cli, &service_prefix("status")).unwrap_or_default();
-    if !status.to_ascii_lowercase().contains("not installed") {
-        let _ = run_owned(&cli, &service_prefix("stop"));
-        run_owned(&cli, &service_prefix("uninstall"))?;
-    }
     let mut install = service_prefix("install");
     install.extend([
         "--display-name".into(),
@@ -469,32 +494,59 @@ pub(crate) fn apply_service_elevated(profile: &MeshProfile) -> Result<(), String
         "2".into(),
     ]);
     run_owned(&cli, &install)?;
-    run_owned(&cli, &service_prefix("start"))?;
     Ok(())
 }
 
 pub(crate) fn remove_service_elevated() -> Result<(), String> {
     let directory = ensure_assets()?;
     let cli = directory.join("easytier-cli.exe");
-    let status = run_owned(&cli, &service_prefix("status")).unwrap_or_default();
-    if status.to_ascii_lowercase().contains("not installed") {
+    if services::state(SERVICE_NAME)?.is_none() {
         return Ok(());
     }
-    let _ = run_owned(&cli, &service_prefix("stop"));
+    services::stop_and_wait(SERVICE_NAME)?;
     run_owned(&cli, &service_prefix("uninstall"))?;
     Ok(())
 }
 
 pub(crate) fn restart_service_elevated() -> Result<(), String> {
-    let directory = ensure_assets()?;
-    let cli = directory.join("easytier-cli.exe");
-    let status = run_owned(&cli, &service_prefix("status")).unwrap_or_default();
-    if status.to_ascii_lowercase().contains("not installed") {
+    if services::state(SERVICE_NAME)?.is_none() {
         return Err("EasyTier 网络服务尚未安装".into());
     }
-    let _ = run_owned(&cli, &service_prefix("stop"));
-    run_owned(&cli, &service_prefix("start"))?;
-    Ok(())
+    services::stop_and_wait(SERVICE_NAME)?;
+    services::start(SERVICE_NAME)
+}
+
+fn restore_after_failure(
+    operation: impl FnOnce() -> Result<(), String>,
+    restore: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
+    match operation() {
+        Ok(()) => Ok(()),
+        Err(error) => match restore() {
+            Ok(()) => Err(format!("{error}；已恢复原配置")),
+            Err(recovery) => Err(format!("{error}；恢复原配置也失败：{recovery}，请修复连接")),
+        },
+    }
+}
+
+fn apply_profile(profile: &MeshProfile) -> Result<(), String> {
+    validate_profile(profile)?;
+    // The installed service may differ from an old (or damaged) profile file.
+    let previous = services::snapshot(SERVICE_NAME)?;
+    let json = serde_json::to_vec(profile).map_err(|error| error.to_string())?;
+    // Prepare complete encrypted data before asking Windows to change a service.
+    let staged = StagedFile::prepare(&profile_path()?, &protect(&json)?)?;
+    install_service(profile)?;
+    restore_after_failure(
+        || {
+            let _guard = PROFILE_IO
+                .get_or_init(|| Mutex::new(()))
+                .lock()
+                .map_err(|_| "配对信息写入锁不可用".to_string())?;
+            staged.commit()
+        },
+        || elevation::execute(PrivilegedTask::MeshRestore { snapshot: previous }),
+    )
 }
 
 fn peer_values() -> Result<Vec<Value>, String> {
@@ -545,7 +597,9 @@ fn parse_peers(values: &[Value]) -> (Option<String>, Vec<MeshPeer>, bool) {
         peers.push(MeshPeer {
             name,
             ip,
-            online: true,
+            online: false,
+            usb_ready: false,
+            problem: Some("正在验证对方电脑是否在线".into()),
             os: "windows".into(),
             latency: item
                 .get("lat_ms")
@@ -560,6 +614,40 @@ fn parse_peers(values: &[Value]) -> (Option<String>, Vec<MeshPeer>, bool) {
         });
     }
     (local_ip, peers, relay_connected)
+}
+
+fn check_peer_health(peers: &mut [MeshPeer]) {
+    // Bound parallel probes without imposing a limit on the number of peers.
+    for batch in peers.chunks_mut(8) {
+        std::thread::scope(|scope| {
+            for peer in batch {
+                scope.spawn(move || {
+                    let health = crate::peer_health::probe(&peer.ip);
+                    peer.online = health.online;
+                    peer.usb_ready = health.usb_ready;
+                    peer.problem = health.problem;
+                });
+            }
+        });
+    }
+}
+
+pub(crate) fn require_usb_peer(host: &str) -> Result<(), String> {
+    if load_profile()?.is_none() {
+        return Err("请先加入加密连接".into());
+    }
+    let (_, peers, _) = parse_peers(&peer_values()?);
+    if !peers.iter().any(|peer| peer.ip == host) {
+        return Err("对方电脑已离线或已离开当前连接，请等待对方上线".into());
+    }
+    let health = crate::peer_health::probe(host);
+    if health.usb_ready {
+        Ok(())
+    } else {
+        Err(health
+            .problem
+            .unwrap_or_else(|| "对方 USB 共享服务不可达".into()))
+    }
 }
 
 pub fn status(include_code: bool) -> Result<MeshStatus, String> {
@@ -582,9 +670,10 @@ pub fn status(include_code: bool) -> Result<MeshStatus, String> {
     migrate_legacy_relay(&mut profile);
     let peer_result = peer_values();
     let service_responding = peer_result.is_ok();
-    let (local_ip, peers, relay_connected) = peer_result
+    let (local_ip, mut peers, relay_connected) = peer_result
         .map(|values| parse_peers(&values))
         .unwrap_or_default();
+    check_peer_health(&mut peers);
     let problem = if !service_responding {
         Some("EasyTier 网络服务没有响应".into())
     } else if !relay_connected {
@@ -598,7 +687,7 @@ pub fn status(include_code: bool) -> Result<MeshStatus, String> {
         local_ip,
         network_name: Some(profile.network_name.clone()),
         relay: profile.relay.clone(),
-        peer_count: peers.len(),
+        peer_count: peers.iter().filter(|peer| peer.online).count(),
         peers,
         pairing_code: if include_code {
             Some(encode_profile(&profile)?)
@@ -627,22 +716,14 @@ fn starting_status(profile: &MeshProfile, pairing_code: Option<String>) -> MeshS
 
 pub fn create(relay: Option<String>) -> Result<MeshStatus, String> {
     let profile = new_profile(relay)?;
-    install_service(&profile)?;
-    if let Err(error) = save_profile(&profile) {
-        let _ = uninstall_service();
-        return Err(error);
-    }
+    apply_profile(&profile)?;
     Ok(starting_status(&profile, Some(encode_profile(&profile)?)))
 }
 
 pub fn join(code: &str) -> Result<MeshStatus, String> {
     let mut profile = decode_profile(code)?;
     migrate_legacy_relay(&mut profile);
-    install_service(&profile)?;
-    if let Err(error) = save_profile(&profile) {
-        let _ = uninstall_service();
-        return Err(error);
-    }
+    apply_profile(&profile)?;
     Ok(starting_status(&profile, None))
 }
 
@@ -664,8 +745,7 @@ pub fn restart() -> Result<MeshStatus, String> {
 pub fn repair() -> Result<MeshStatus, String> {
     let mut profile = load_profile()?.ok_or("尚未创建或加入连接")?;
     migrate_legacy_relay(&mut profile);
-    save_profile(&profile)?;
-    install_service(&profile)?;
+    apply_profile(&profile)?;
     Ok(starting_status(&profile, None))
 }
 
@@ -677,14 +757,58 @@ pub fn change_relay(relay: String) -> Result<MeshStatus, String> {
     validate_relay(&relay)?;
     let mut profile = load_profile()?.ok_or("尚未创建或加入连接")?;
     profile.relay = relay;
-    install_service(&profile)?;
-    save_profile(&profile)?;
+    apply_profile(&profile)?;
     Ok(starting_status(&profile, None))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_profile_commit_restores_service_and_keeps_previous_profile() {
+        use std::cell::Cell;
+        use std::os::windows::fs::OpenOptionsExt;
+        let directory = env::temp_dir().join(format!("usblink-rollback-{}", Uuid::new_v4()));
+        let path = directory.join("profile.dat");
+        fs::create_dir_all(&directory).unwrap();
+        let previous = protect(b"previous pairing").unwrap();
+        fs::write(&path, &previous).unwrap();
+        let staged = StagedFile::prepare(&path, &protect(b"new pairing").unwrap()).unwrap();
+        let lock = fs::OpenOptions::new()
+            .read(true)
+            .share_mode(0)
+            .open(&path)
+            .unwrap();
+        let service = Cell::new("new service configuration");
+        let error = restore_after_failure(
+            || staged.commit(),
+            || {
+                service.set("previous service configuration");
+                Ok(())
+            },
+        )
+        .unwrap_err();
+        drop(lock);
+        assert!(error.contains("已恢复原配置"));
+        assert_eq!(service.get(), "previous service configuration");
+        assert_eq!(fs::read(&path).unwrap(), previous);
+        assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        fs::remove_dir_all(directory).unwrap();
+    }
+
+    #[test]
+    fn configuration_recovery_does_not_mask_failure_or_revert_success() {
+        assert!(restore_after_failure(|| Ok(()), || panic!("must not undo success")).is_ok());
+        let error = restore_after_failure(
+            || Err("无法启动新服务".into()),
+            || Err("原服务也无法启动".into()),
+        )
+        .unwrap_err();
+        assert!(error.contains("无法启动新服务"));
+        assert!(error.contains("恢复原配置也失败：原服务也无法启动"));
+        assert!(!error.contains("已恢复原配置"));
+    }
 
     #[test]
     fn pairing_code_round_trip() {
@@ -716,6 +840,8 @@ mod tests {
         assert_eq!(local.as_deref(), Some("10.0.0.1"));
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].name, "OFFICE-PC");
+        assert!(!peers[0].online, "discovery alone cannot confirm presence");
+        assert!(!peers[0].usb_ready);
         assert!(relay_connected);
     }
 

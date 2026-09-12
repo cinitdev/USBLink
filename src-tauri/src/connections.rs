@@ -1,8 +1,9 @@
 use regex::Regex;
 use serde::Serialize;
 use std::collections::HashSet;
+use std::time::Duration;
 
-use crate::{classify, ensure_success, find_executable, run, safe_remote_name, UsbDevice};
+use crate::{classify, ensure_success, find_executable, safe_remote_name, UsbDevice};
 
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -13,14 +14,24 @@ pub(crate) struct AttachedDevice {
     device: UsbDevice,
 }
 
+impl AttachedDevice {
+    pub(crate) fn matches(&self, host: &str, bus_id: &str) -> bool {
+        self.host.eq_ignore_ascii_case(host) && self.device.bus_id == bus_id
+    }
+}
+
 pub(crate) fn list() -> Result<Vec<AttachedDevice>, String> {
+    list_with_timeout(Duration::from_secs(30))
+}
+
+pub(crate) fn list_with_timeout(timeout: Duration) -> Result<Vec<AttachedDevice>, String> {
     let executable = find_executable("usbip.exe").ok_or("未安装 usbip-win2")?;
-    let content = ensure_success(run(&executable, &["port"])?)?;
+    let content = ensure_success(crate::process::run(&executable, &["port"], timeout)?)?;
     parse(&content)
 }
 
 // Format verified against usbip-win2 v.0.9.8.0 userspace/usbip/port.cpp.
-fn parse(content: &str) -> Result<Vec<AttachedDevice>, String> {
+pub(crate) fn parse(content: &str) -> Result<Vec<AttachedDevice>, String> {
     let invalid = || "无法识别 USB/IP 已挂载端口输出，连接状态待确认".to_string();
     let header = Regex::new(r"(?im)^\s*Port\s+(\d+):\s*device in use at[^\r\n]*").unwrap();
     let product = Regex::new(r"(?m)^\s*(.+?)\s+\(([0-9a-fA-F]{4}:[0-9a-fA-F]{4})\)\s*$").unwrap();

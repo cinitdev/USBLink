@@ -18,6 +18,7 @@ await page.addInitScript(() => {
     async invoke(command) {
       state.calls[command] = (state.calls[command] || 0) + 1;
       switch (command) {
+        case "get_sharing_session": return { phase: "ready", ready: true, problem: null };
         case "get_environment_status": return environment;
         case "get_mesh_status": return state.noPeers ? { ...mesh, running: false, peers: [], peerCount: 0, problem: "模拟网络查询失败" } : mesh;
         case "list_local_devices": return [{ ...phone, attached: true }];
@@ -32,7 +33,7 @@ await page.addInitScript(() => {
         case "attach_devices":
           await new Promise((resolve) => { state.pendingAttach = resolve; });
           state.attached = [{ ...phone, host: peer.ip, port: 1, attached: true }];
-          return;
+          return state.attached.map(device => ({ ...device }));
         case "detach_all_devices": state.attached = []; return;
         default: throw new Error("Unexpected command: " + command);
       }
@@ -47,11 +48,13 @@ try {
   await page.getByRole("checkbox", { name: "选择 Redmi K40", exact: true }).click();
   await page.getByRole("button", { name: "连接所选设备", exact: true }).click();
   await page.waitForFunction(() => !!window.usbTest.pendingAttach);
+  const remoteReads = await page.evaluate(() => window.usbTest.calls.list_remote_devices);
   await page.evaluate(() => { window.usbTest.remoteError = true; });
   await page.getByRole("button", { name: "刷新", exact: true }).click();
-  await page.getByText(/远程设备列表暂时无法更新/).waitFor();
+  assert.equal(await page.evaluate(() => window.usbTest.calls.list_remote_devices), remoteReads, "discovery waits for an in-progress import");
   assert.equal(await page.getByRole("button", { name: "正在连接…", exact: true }).isDisabled(), true);
   await page.evaluate(() => window.usbTest.pendingAttach());
+  await page.getByText(/远程设备列表暂时无法更新/).waitFor();
   const imported = page.getByRole("region", { name: "已连接到本机的 USB", exact: true });
   await imported.getByText("Redmi K40", { exact: true }).waitFor();
   await imported.getByText("已连接", { exact: true }).waitFor();
@@ -60,7 +63,8 @@ try {
 
   await page.evaluate(() => { window.usbTest.noPeers = true; });
   await page.getByRole("button", { name: "刷新", exact: true }).click();
-  await page.getByRole("heading", { name: "等待另一台电脑加入", exact: true }).waitFor();
+  await imported.getByText("对方状态待确认", { exact: true }).waitFor();
+  await page.locator(".peer-picker").getByText("LAPTOP", { exact: true }).waitFor();
   assert.equal(await imported.getByText("Redmi K40", { exact: true }).count(), 1);
   await page.setViewportSize({ width: 820, height: 600 });
   await page.screenshot({ path: "ui-usb-peer-query-failed-820.png" });
@@ -75,7 +79,7 @@ try {
 
   await page.evaluate(() => { window.usbTest.portError = false; window.usbTest.noPeers = false; window.usbTest.remoteError = false; });
   await page.getByRole("button", { name: "刷新", exact: true }).click();
-  await imported.getByRole("heading", { name: /已连接到本机/ }).waitFor();
+  await imported.getByText("已连接", { exact: true }).waitFor();
   await page.getByRole("checkbox", { name: "选择 Redmi K40", exact: true }).waitFor();
   assert.equal(await page.getByRole("checkbox", { name: "选择 Redmi K40", exact: true }).isDisabled(), true);
   await imported.getByRole("button", { name: "断开全部 USB", exact: true }).click();
@@ -89,7 +93,8 @@ try {
   });
   await page.getByRole("button", { name: "刷新", exact: true }).click();
   await imported.getByText("Redmi K40 6", { exact: true }).waitFor();
-  assert.equal(await imported.getByText("已连接", { exact: true }).count(), 6);
+  assert.equal(await imported.getByText("已连接", { exact: true }).count(), 1);
+  assert.equal(await imported.getByText("对方状态待确认", { exact: true }).count(), 5);
   await page.screenshot({ path: "ui-usb-six-devices-820.png" });
   await page.evaluate(() => { window.usbTest.attached = []; });
   await page.getByRole("button", { name: "刷新", exact: true }).click();

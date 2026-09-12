@@ -1,6 +1,6 @@
 {
   "name": "usblink",
-  "version": "0.2.12",
+  "version": "0.2.16",
   "private": true,
   "type": "module",
   "scripts": {
@@ -10,7 +10,7 @@
     "preview": "vite preview --host 127.0.0.1",
     "tauri": "tauri",
     "tauri:dev": "tauri dev",
-    "tauri:build": "tauri build --no-bundle"
+    "tauri:build": "tauri build"
   },
   "dependencies": {
     "@fluentui/react-icons": "^2.0.306",

@@ -1,7 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 use regex::Regex;
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 use std::collections::HashSet;
 use std::env;
 use std::fs;
@@ -11,12 +11,18 @@ use std::path::{Path, PathBuf};
 use std::process::{Command, Output};
 use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
+use tauri::Manager;
 
+mod atomic_file;
+mod attachment;
 mod connections;
 mod device_metadata;
 mod elevation;
 mod mesh;
+mod peer_health;
 mod process;
+mod services;
+mod sharing_session;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const DETACH_ALL_ARGS: [&str; 2] = ["detach", "--all"];
@@ -308,31 +314,59 @@ fn safe_remote_name(name: &str, vid_pid: &str) -> String {
     }
 }
 
-fn parse_local_devices(content: &str) -> Vec<UsbDevice> {
-    let pattern = Regex::new(
-        r"^\s*(\d+-\d+(?:\.\d+)*)\s+([0-9A-Fa-f]{4}:[0-9A-Fa-f]{4})\s+(.+?)\s{2,}(.+?)\s*$",
-    )
-    .unwrap();
-    content
-        .lines()
-        .filter_map(|line| {
-            let capture = pattern.captures(line)?;
-            let state = capture[4].to_ascii_lowercase();
-            let attached = state == "attached";
-            let shared = attached || state.starts_with("shared");
-            let name = capture[3].trim().to_string();
-            let vid_pid = capture[2].to_ascii_lowercase();
-            Some(UsbDevice {
-                bus_id: capture[1].to_string(),
-                detail: classify(&name, &vid_pid),
-                vid_pid,
-                name,
-                shared,
-                attached,
-                friendly_name: true,
-            })
-        })
-        .collect()
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct LocalState {
+    devices: Vec<LocalStateDevice>,
+}
+
+#[derive(Deserialize)]
+#[serde(rename_all = "PascalCase")]
+struct LocalStateDevice {
+    bus_id: Option<String>,
+    description: String,
+    instance_id: String,
+    persisted_guid: Option<String>,
+    #[serde(rename = "ClientIPAddress")]
+    client_ip_address: Option<String>,
+}
+
+fn parse_local_devices(content: &str) -> Result<Vec<UsbDevice>, String> {
+    let state: LocalState = serde_json::from_str(content.trim_start_matches('\u{feff}'))
+        .map_err(|error| format!("无法识别 usbipd-win 的 JSON 状态，请更新共享组件：{error}"))?;
+    let id = Regex::new(r"(?i)VID_([0-9a-f]{4})&PID_([0-9a-f]{4})").unwrap();
+    let mut devices = Vec::new();
+    for item in state.devices {
+        let Some(bus_id) = item.bus_id.filter(|value| !value.is_empty()) else {
+            continue;
+        };
+        validate_bus_id(&bus_id)?;
+        let matched = id
+            .captures(&item.instance_id)
+            .ok_or("USB 状态缺少有效的 VID/PID")?;
+        let vid_pid = format!("{}:{}", &matched[1], &matched[2]).to_ascii_lowercase();
+        let attached = item.client_ip_address.is_some();
+        let shared = attached || item.persisted_guid.is_some();
+        let name = if item.description.trim().is_empty() {
+            format!("USB 设备 {vid_pid}")
+        } else {
+            item.description
+        };
+        devices.push(UsbDevice {
+            bus_id,
+            detail: classify(&name, &vid_pid),
+            vid_pid,
+            name,
+            attached,
+            shared,
+            friendly_name: true,
+        });
+    }
+    Ok(devices)
+}
+
+fn query_local_devices(executable: &Path) -> Result<Vec<UsbDevice>, String> {
+    parse_local_devices(&ensure_success(run(executable, &["state"])?)?)
 }
 
 fn parse_remote_devices(content: &str) -> Vec<UsbDevice> {
@@ -398,10 +432,7 @@ async fn list_local_devices() -> Result<Vec<UsbDevice>, String> {
 
 fn list_local_devices_blocking() -> Result<Vec<UsbDevice>, String> {
     let executable = find_executable("usbipd.exe").ok_or("未安装 usbipd-win，请先在设置中安装")?;
-    Ok(parse_local_devices(&ensure_success(run(
-        &executable,
-        &["list"],
-    )?)?))
+    query_local_devices(&executable)
 }
 
 #[tauri::command]
@@ -417,6 +448,7 @@ async fn share_devices(bus_ids: Vec<String>) -> Result<(), String> {
 }
 
 fn share_devices_blocking(bus_ids: Vec<String>) -> Result<(), String> {
+    sharing_session::require_ready()?;
     if bus_ids.is_empty() {
         return Err("请先选择 USB 设备".into());
     }
@@ -432,7 +464,7 @@ fn share_devices_blocking(bus_ids: Vec<String>) -> Result<(), String> {
         bus_ids: bus_ids.clone(),
         mesh_ip: mesh_ip.clone(),
     })?;
-    let devices = parse_local_devices(&ensure_success(run(&usbipd, &["list"])?)?);
+    let devices = query_local_devices(&usbipd)?;
     let missing = bus_ids
         .iter()
         .filter(|bus_id| {
@@ -464,8 +496,9 @@ async fn ensure_usb_sharing_ready() -> Result<bool, String> {
 }
 
 fn ensure_usb_sharing_ready_blocking() -> Result<bool, String> {
+    sharing_session::require_ready()?;
     let usbipd = find_executable("usbipd.exe").ok_or("未安装 usbipd-win")?;
-    let devices = parse_local_devices(&ensure_success(run(&usbipd, &["list"])?)?);
+    let devices = query_local_devices(&usbipd)?;
     if !devices.iter().any(|device| device.shared) {
         return Ok(false);
     }
@@ -495,8 +528,9 @@ async fn repair_usb_sharing() -> Result<(), String> {
 }
 
 fn repair_usb_sharing_blocking() -> Result<(), String> {
+    sharing_session::require_ready()?;
     let usbipd = find_executable("usbipd.exe").ok_or("未安装 usbipd-win")?;
-    let devices = parse_local_devices(&ensure_success(run(&usbipd, &["list"])?)?);
+    let devices = query_local_devices(&usbipd)?;
     if !devices.iter().any(|device| device.shared) {
         return Err("当前没有已共享的 USB 设备".into());
     }
@@ -691,7 +725,10 @@ fn query_remote_devices(host: String) -> Result<Vec<UsbDevice>, String> {
 }
 
 #[tauri::command]
-async fn attach_devices(host: String, bus_ids: Vec<String>) -> Result<(), String> {
+async fn attach_devices(
+    host: String,
+    bus_ids: Vec<String>,
+) -> Result<Vec<connections::AttachedDevice>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock()
             .try_lock()
@@ -702,7 +739,10 @@ async fn attach_devices(host: String, bus_ids: Vec<String>) -> Result<(), String
     .map_err(|error| format!("后台操作失败：{error}"))?
 }
 
-fn attach_devices_blocking(host: String, bus_ids: Vec<String>) -> Result<(), String> {
+fn attach_devices_blocking(
+    host: String,
+    bus_ids: Vec<String>,
+) -> Result<Vec<connections::AttachedDevice>, String> {
     validate_host(&host)?;
     if bus_ids.is_empty() {
         return Err("请先选择远程 USB 设备".into());
@@ -715,13 +755,19 @@ fn attach_devices_blocking(host: String, bus_ids: Vec<String>) -> Result<(), Str
     let _guard = attach_lock()
         .lock()
         .map_err(|_| "USB 连接状态锁异常，请重新打开 USBLink".to_string())?;
-    for bus_id in bus_ids {
-        ensure_success(run(
-            &executable,
-            &["attach", "--once", "-r", &host, "-b", &bus_id],
-        )?)?;
-    }
-    Ok(())
+    mesh::require_usb_peer(&host)?;
+    attachment::connect(
+        &host,
+        &bus_ids,
+        |bus_id| {
+            ensure_success(run(
+                &executable,
+                &["attach", "--once", "-r", &host, "-b", bus_id],
+            )?)
+            .map(|_| ())
+        },
+        connections::list_with_timeout,
+    )
 }
 
 #[tauri::command]
@@ -807,10 +853,64 @@ fn open_dependency_download_blocking(kind: String) -> Result<(), String> {
     Ok(())
 }
 
+#[tauri::command]
+fn get_sharing_session() -> sharing_session::Status {
+    sharing_session::session().status()
+}
+
+#[tauri::command]
+async fn retry_sharing_cleanup() -> Result<sharing_session::Status, String> {
+    tauri::async_runtime::spawn_blocking(sharing_session::prepare)
+        .await
+        .map_err(|error| format!("共享清理后台操作失败：{error}"))
+}
+
+fn show_native_error(message: &str) {
+    use windows_sys::Win32::UI::WindowsAndMessaging::{MessageBoxW, MB_ICONERROR, MB_OK};
+    let title: Vec<u16> = "USBLink\0".encode_utf16().collect();
+    let body: Vec<u16> = message.encode_utf16().chain(std::iter::once(0)).collect();
+    unsafe {
+        MessageBoxW(
+            std::ptr::null_mut(),
+            body.as_ptr(),
+            title.as_ptr(),
+            MB_OK | MB_ICONERROR,
+        );
+    }
+}
+
+fn request_clean_exit(app: tauri::AppHandle) {
+    if !sharing_session::session().begin_close() {
+        return;
+    }
+    tauri::async_runtime::spawn_blocking(move || {
+        // Wait for an in-flight bind/UAC task before taking the final snapshot.
+        let result = operation_lock()
+            .lock()
+            .map_err(|_| "USB 操作锁不可用".to_string())
+            .and_then(|_guard| sharing_session::clear_shared_devices());
+        if sharing_session::session().finish_close(result) {
+            app.exit(0);
+        } else if let Some(problem) = sharing_session::session().status().problem {
+            show_native_error(&problem);
+        }
+    });
+}
+
 fn main() {
     if let Some(task_path) = elevation::task_path_from_args() {
         std::process::exit(elevation::execute_task_file(&task_path));
     }
+    let _instance = match mesh::app_root().and_then(|directory| {
+        fs::create_dir_all(&directory).map_err(|error| error.to_string())?;
+        sharing_session::lock_instance(&directory.join("sharing-session.lock"))
+    }) {
+        Ok(lock) => lock,
+        Err(error) => {
+            show_native_error(&error);
+            return;
+        }
+    };
     std::thread::spawn(|| {
         if let Ok(_guard) = operation_lock().lock() {
             stop_legacy_attach_attempts();
@@ -818,7 +918,21 @@ fn main() {
     });
     let _ = device_metadata::start_server();
     tauri::Builder::default()
+        .setup(|_| {
+            tauri::async_runtime::spawn_blocking(sharing_session::prepare);
+            Ok(())
+        })
+        .on_window_event(|window, event| {
+            if let tauri::WindowEvent::CloseRequested { api, .. } = event {
+                if sharing_session::session().status().phase != "closed" {
+                    api.prevent_close();
+                    request_clean_exit(window.app_handle().clone());
+                }
+            }
+        })
         .invoke_handler(tauri::generate_handler![
+            get_sharing_session,
+            retry_sharing_cleanup,
             get_environment_status,
             get_mesh_status,
             create_mesh,
@@ -841,8 +955,16 @@ fn main() {
             set_auto_start,
             open_dependency_download
         ])
-        .run(tauri::generate_context!())
-        .expect("USBLink failed to start");
+        .build(tauri::generate_context!())
+        .expect("USBLink failed to start")
+        .run(|app, event| {
+            if let tauri::RunEvent::ExitRequested { api, .. } = event {
+                if sharing_session::session().status().phase != "closed" {
+                    api.prevent_exit();
+                    request_clean_exit(app.clone());
+                }
+            }
+        });
 }
 
 #[cfg(test)]
@@ -850,25 +972,27 @@ mod tests {
     use super::*;
 
     #[test]
-    fn parses_local_usbipd_rows() {
-        let value = "BUSID  VID:PID    DEVICE                                      STATE\n1-4    18d1:4ee7  Pixel 9 Pro                                 Not shared\n1-7    1a86:7523  USB-SERIAL CH340                            Shared";
-        let devices = parse_local_devices(value);
-        assert_eq!(devices.len(), 2);
-        assert_eq!(devices[0].bus_id, "1-4");
-        assert!(!devices[0].shared);
-        assert!(devices[1].shared);
-        assert!(devices[0].friendly_name);
-    }
-
-    #[test]
-    fn attached_local_device_remains_shared() {
-        let devices = parse_local_devices(
-            "3-2    18d1:4ee7  Redmi K40    Attached\n3-3    1234:5678  Test    Shared (forced)\n3-4    1234:5679  Test    Not shared",
-        );
+    fn local_json_preserves_full_names_and_shared_attached_states() {
+        let content = serde_json::json!({"Devices": [
+            {"BusId":"3-2","Description":"Redmi  K40 名称包含  双空格","InstanceId":"USB\\VID_18D1&PID_4EE7\\example","PersistedGuid":null,"ClientIPAddress":"10.0.0.2"},
+            {"BusId":"3-3","Description":"测试设备","InstanceId":"USB\\VID_1234&PID_5678\\example","PersistedGuid":"test-guid","ClientIPAddress":null},
+            {"BusId":"3-4","Description":"未共享","InstanceId":"USB\\VID_1234&PID_5679\\example","PersistedGuid":null,"ClientIPAddress":null},
+            {"BusId":null,"Description":"已拔出","InstanceId":"USB\\VID_1234&PID_5679\\example","PersistedGuid":"test-guid","ClientIPAddress":null}
+        ]});
+        let devices = parse_local_devices(&content.to_string()).unwrap();
         assert_eq!(devices.len(), 3);
+        assert_eq!(devices[0].name, "Redmi  K40 名称包含  双空格");
+        assert_eq!(devices[0].vid_pid, "18d1:4ee7");
         assert!(devices[0].shared && devices[0].attached);
         assert!(devices[1].shared && !devices[1].attached);
         assert!(!devices[2].shared && !devices[2].attached);
+    }
+
+    #[test]
+    fn malformed_local_state_is_not_an_empty_success() {
+        assert!(parse_local_devices("{}").is_err());
+        assert!(parse_local_devices("not json").is_err());
+        assert!(parse_local_devices(r#"{"Devices":[]}"#).unwrap().is_empty());
     }
 
     #[test]

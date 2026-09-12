@@ -3704,7 +3704,7 @@ dependencies = [
 
 [[package]]
 name = "usblink"
-version = "0.2.12"
+version = "0.2.16"
 dependencies = [
  "base64 0.22.1",
  "regex",

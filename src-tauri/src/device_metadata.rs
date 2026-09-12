@@ -4,7 +4,7 @@ use std::net::{Ipv4Addr, SocketAddr, TcpListener, TcpStream, ToSocketAddrs};
 use std::thread;
 use std::time::Duration;
 
-use crate::{find_executable, parse_local_devices, run, text, validate_bus_id, UsbDevice};
+use crate::{find_executable, query_local_devices, validate_bus_id, UsbDevice};
 
 const MAGIC: &[u8; 8] = b"USBLINK2";
 const TOKEN_LENGTH: usize = 32;
@@ -89,14 +89,10 @@ fn local_shared_device_names() -> Vec<DeviceName> {
     let Some(usbipd) = find_executable("usbipd.exe") else {
         return Vec::new();
     };
-    let Ok(output) = run(&usbipd, &["list"]) else {
-        return Vec::new();
-    };
-    if !output.status.success() {
-        return Vec::new();
-    }
-    parse_local_devices(&text(&output))
+    query_local_devices(&usbipd)
+        .unwrap_or_default()
         .into_iter()
+        .filter(|device| device.shared)
         .map(|device| DeviceName {
             bus_id: device.bus_id,
             vid_pid: device.vid_pid,
