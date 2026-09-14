@@ -15,6 +15,7 @@ use tauri::Manager;
 
 mod atomic_file;
 mod attachment;
+mod attachment_preflight;
 mod connections;
 mod detachment;
 mod device_metadata;
@@ -742,12 +743,13 @@ fn query_remote_devices(host: String) -> Result<Vec<UsbDevice>, String> {
 async fn attach_devices(
     host: String,
     bus_ids: Vec<String>,
+    expected_vid_pids: std::collections::HashMap<String, String>,
 ) -> Result<Vec<connections::AttachedDevice>, String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock()
             .try_lock()
             .map_err(|_| "另一个 USB 或网络操作正在进行，请稍后重试".to_string())?;
-        attach_devices_blocking(host, bus_ids)
+        attach_devices_blocking(host, bus_ids, expected_vid_pids)
     })
     .await
     .map_err(|error| format!("后台操作失败：{error}"))?
@@ -756,6 +758,7 @@ async fn attach_devices(
 fn attach_devices_blocking(
     host: String,
     bus_ids: Vec<String>,
+    expected_vid_pids: std::collections::HashMap<String, String>,
 ) -> Result<Vec<connections::AttachedDevice>, String> {
     sharing_session::require_ready()?;
     validate_host(&host)?;
@@ -764,6 +767,13 @@ fn attach_devices_blocking(
     }
     for bus_id in &bus_ids {
         validate_bus_id(bus_id)?;
+        if !expected_vid_pids.get(bus_id).is_some_and(|id| {
+            Regex::new(r"^[0-9a-fA-F]{4}:[0-9a-fA-F]{4}$")
+                .unwrap()
+                .is_match(id)
+        }) {
+            return Err("所选 USB 缺少有效型号标识，请刷新后重新选择".into());
+        }
     }
     let executable = find_executable("usbip.exe").ok_or("未安装 usbip-win2")?;
     require_safe_usbip(&executable)?;
@@ -771,19 +781,31 @@ fn attach_devices_blocking(
         .lock()
         .map_err(|_| "USB 连接状态锁异常，请重新打开 USBLink".to_string())?;
     mesh::require_usb_peer(&host)?;
+    let receipt = std::cell::RefCell::new(None);
     attachment::connect(
         &host,
         &bus_ids,
         |bus_id| {
+            *receipt.borrow_mut() = None;
+            attachment_preflight::prepare(&executable, &host, bus_id, &expected_vid_pids[bus_id], sharing_session::require_ready)?;
+            mesh::require_usb_peer(&host)?;
             sharing_session::require_ready()?;
-            ensure_success(run(
+            // Another client action may have completed while the source settled.
+            if connections::list_with_timeout(Duration::from_secs(3))?.iter().any(|device| device.matches(&host, bus_id)) {
+                return Ok(());
+            }
+            let port = attachment::parse_import_port(&ensure_success(run(
                 &executable,
-                &["attach", "--once", "-r", &host, "-b", bus_id],
-            )?)
-            .map(|_| ())
+                &["attach", "--once", "--terse", "-r", &host, "-b", bus_id],
+            )?)?)?;
+            *receipt.borrow_mut() = Some((bus_id.to_string(), port));
+            Ok(())
         },
         connections::list_with_timeout,
-    )
+    ).map_err(|error| match receipt.borrow().as_ref() {
+        Some((bus_id, port)) => format!("{error}。设备 {bus_id} 首次分配的本机端口为 {port}；若端口已消失，表示连接建立后又断开，未自动补试"),
+        None => error,
+    })
 }
 
 #[tauri::command]

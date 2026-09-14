@@ -509,7 +509,7 @@ export default function App() {
     usbOperation.current = true; attached.pause();
     let confirmed = false;
     try {
-      const result = await backend("attach_devices", { host, busIds: chosen.map((item) => item.busId) }, () => {
+      const result = await backend("attach_devices", { host, busIds: chosen.map((item) => item.busId), expectedVidPids: Object.fromEntries(chosen.map((item) => [item.busId, item.vidPid])) }, () => {
         previewAttached.current = [...previewAttached.current, ...chosen.map((item, index) => ({ ...item, host, attached: true, port: previewAttached.current.length + index + 1 }))];
         return previewAttached.current;
       });

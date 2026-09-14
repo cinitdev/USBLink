@@ -15,7 +15,7 @@ async function scenario(fail = false) {
     const peer = { name: "HOST-PC", ip: "10.126.126.2", online: true, latency: "5", tunnel: "udp" };
     const mesh = { configured: true, running: true, localIp: "10.126.126.1", networkName: "single-click-test", relay: "tcp://183.230.36.171:11010", peerCount: 1, peers: [peer], problem: null, needsRepair: false };
     const state = window.singleTest = { calls: {}, mounted: [], pending: false, exported: [device], deferMesh: false, deferRemote: false, deferPorts: false };
-    window.__TAURI_INTERNALS__ = { async invoke(command) {
+    window.__TAURI_INTERNALS__ = { async invoke(command, args) {
       state.calls[command] = (state.calls[command] || 0) + 1;
       switch (command) {
         case "get_sharing_session": return { phase: "ready", ready: true, problem: null };
@@ -32,6 +32,7 @@ async function scenario(fail = false) {
           if (state.deferPorts) { state.deferPorts = false; return new Promise(resolve => { state.finishPorts = () => resolve([]); }); }
           return structuredClone(state.mounted);
         case "attach_devices":
+          state.attachArgs = args;
           state.pending = true;
           return new Promise((resolve, reject) => { state.finishAttach = success => {
             state.pending = false;
@@ -74,6 +75,7 @@ async function scenario(fail = false) {
       assert.equal(await page.getByRole("button", { name: "连接所选设备", exact: true }).isDisabled(), true);
     }
     assert.equal(await page.evaluate(() => window.singleTest.calls.attach_devices), 1, "never submit attach twice");
+    assert.deepEqual(await page.evaluate(() => window.singleTest.attachArgs), { host: "10.126.126.2", busIds: ["3-2"], expectedVidPids: { "3-2": "18d1:4ee7" } }, "native preflight must validate the device the user selected");
     assert.deepEqual(errors, []);
     console.log(`PASS: single click ${fail ? "reports failure without false success or automatic reattach" : "retains the row and shows the confirmed mount with auto-refresh disabled"}`);
   } finally { await context.close(); }

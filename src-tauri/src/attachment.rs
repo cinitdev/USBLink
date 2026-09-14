@@ -4,6 +4,17 @@ use std::time::{Duration, Instant};
 
 use crate::connections::AttachedDevice;
 
+// usbip-win2's --terse result is the port allocated by the driver, not merely
+// an acknowledgement. Keep it so an immediately lost mount can be diagnosed.
+pub(crate) fn parse_import_port(output: &str) -> Result<u16, String> {
+    output
+        .trim()
+        .parse::<u16>()
+        .ok()
+        .filter(|port| (1..=255).contains(port))
+        .ok_or_else(|| "USB/IP 未返回有效的挂载端口，连接结果待确认；未重复提交挂载".into())
+}
+
 // Submit each requested import exactly once, then only read driver state.
 // A successful CLI exit alone must not unlock the UI for another import.
 pub(crate) fn connect(
@@ -73,6 +84,14 @@ fn connect_with_timeout(
 mod tests {
     use super::*;
     use std::cell::Cell;
+    #[test]
+    fn import_receipt_requires_a_real_driver_port() {
+        assert_eq!(parse_import_port("1\r\n").unwrap(), 1);
+        assert_eq!(parse_import_port("255").unwrap(), 255);
+        for value in ["", "0", "256", "-1", "1\n2", "error", "1 extra"] {
+            assert!(parse_import_port(value).is_err(), "{value}");
+        }
+    }
     fn mounted(host: &str, bus: &str) -> Vec<AttachedDevice> {
         crate::connections::parse(&format!("Imported USB devices\nPort 01: device in use at High Speed(480Mbps)\n Test device (1234:5678)\n -> usbip://{host}:3240/{bus}\n")).unwrap()
     }
