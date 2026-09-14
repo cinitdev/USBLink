@@ -6,7 +6,9 @@ USBLink 是一个中文 Windows 桌面工具，为免费的 USB/IP 组件提供�
 
 从 [GitHub Releases](https://github.com/cinitdev/USBLink/releases/latest) 下载 Windows x64 的 `Setup.exe` 安装包。双击打开中文安装向导，选择安装目录后完成安装；可创建开始菜单和桌面快捷方式，也可以从 Windows“设置 → 应用”中卸载。默认安装到当前用户目录。
 
-安装包会检查 WebView2，缺失时联网下载并安装。USB 驱动仍通过应用“设置”页安装；EasyTier 和许可证已包含在程序及安装资源中。升级或卸载前先正常关闭 USBLink，等待共享停止；安装器不会通过强制结束进程来绕过共享清理。已开启的开机启动项会指向新的安装路径。
+安装包会检查 WebView2，缺失时联网下载并安装。USB 驱动仍通过应用“设置”页安装；EasyTier 和许可证已包含在程序及安装资源中。已开启的开机启动项会指向新的安装路径。
+
+升级默认选择“直接更新（推荐，保留配置，无需卸载）”，沿用原安装目录并保留配对信息、设置及快捷方式；也可自行选择先卸载再安装。同版本支持保留配置重新安装。0.2.20 起，如果 USBLink 仍在运行，提示“结束进程并继续？”；点击“确定”后安装器会结束当前用户的 USBLink 进程，并确认进程与会话锁都释放后继续，无需手动关闭。点击“取消”退出本次操作；结束失败可重试。强制结束会跳过 USB 共享和挂载清理，遗留状态在下次启动 USBLink 时清理。静默/被动安装不擅自结束进程，遇到占用返回 1618。旧安装包的提示需关闭后改用新版安装包。
 
 卸载应用会保留配对配置、独立的 EasyTier 网络服务和 USB 驱动；如果需要离开加密网络，请先在应用中点击“离开连接”。
 
@@ -54,6 +56,8 @@ USBLink 启动后还会核对 Windows 中实际安装的 EasyTier 服务参数�
 
 ## USB 连接状态
 
+0.2.19 在唯一一次挂载请求之前，连续查询所选设备的远端导出记录，核对设备编号、VID/PID 和设备路径，等共享端记录稳定后再连接。准备期间保持“正在连接”；设备变更或一直未就绪时不提交挂载。挂载失败后仍禁止任何自动补试，成功后掉线也不会自动重连。
+
 USBLink 使用只读的 `usbip port` 查询本机真实挂载状态。远程列表短暂失败不会隐藏本机仍已挂载的 USB；对方失联时保留记录供手动断开，同时显示“对方 USBLink 未运行或不可达”，不再显示绿色“已连接”。端口查询失败时保留上次结果并显示“状态待确认”，成功查询到空列表后才移除挂载记录。挂载与在线探测不等于已经验证应用数据传输正常。
 
 共享端的 `Attached` 会显示为“正在被使用”，仍属于已共享设备。连接和断开后都会重新查询状态；不会触发自动重连。
@@ -68,7 +72,7 @@ cargo test --manifest-path src-tauri\Cargo.toml
 npm run tauri:build
 ```
 
-默认构建会生成 NSIS 安装包：`src-tauri\target\release\bundle\nsis\USBLink_0.2.17_x64-setup.exe`。安装器配置位于 `src-tauri/tauri.conf.json`，升级/卸载检查位于 `src-tauri/installer-hooks.nsh`。
+默认构建会生成 NSIS 安装包：`src-tauri\target\release\bundle\nsis\USBLink_0.2.20_x64-setup.exe`。安装器配置位于 `src-tauri/tauri.conf.json`，升级/卸载检查位于 `src-tauri/installer-hooks.nsh`，自定义模板来源及验证步骤见 [安装器维护说明](src-tauri/INSTALLER.md)。
 
 在没有运行中的 USBLink、没有现有安装和同名快捷方式的测试账户中，可以运行 `tests/installer-smoke.ps1` 验证静默安装、覆盖安装、文件校验、快捷方式、卸载注册及卸载后保留用户文件；脚本不启动应用，并恢复测试前的开机启动项。
 
