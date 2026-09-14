@@ -1,5 +1,15 @@
 # Third-Party Notices
 
+## Tauri NSIS installer template and Chinese translation
+
+USBLink adapts the Tauri CLI 2.11.4 NSIS installer template and Simplified Chinese strings for retryable shutdown checks and in-place upgrades.
+
+- Source: https://github.com/tauri-apps/tauri/tree/tauri-cli-v2.11.4/crates/tauri-bundler/src/bundle/windows/nsis
+- Copyright (c) 2017 - Present Tauri Apps Contributors
+- License used: MIT
+- Included license: `src-tauri/LICENSE-TAURI-TEMPLATE.txt` (installed as `licenses/LICENSE-TAURI-TEMPLATE.txt`)
+- Local modifications and validation: `src-tauri/INSTALLER.md`
+
 ## EasyTier 2.6.4
 
 USBLink redistributes unmodified Windows binaries from EasyTier 2.6.4 as a separately executed networking component.
