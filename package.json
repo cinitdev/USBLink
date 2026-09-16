@@ -1,6 +1,6 @@
 {
   "name": "usblink",
-  "version": "0.2.20",
+  "version": "0.3.8",
   "private": true,
   "type": "module",
   "scripts": {

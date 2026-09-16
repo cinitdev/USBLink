@@ -26,6 +26,7 @@ mod presence;
 mod process;
 mod services;
 mod sharing_session;
+mod usb_origin;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
 const DETACH_ALL_ARGS: [&str; 2] = ["detach", "--all"];
@@ -330,21 +331,34 @@ struct LocalStateDevice {
     bus_id: Option<String>,
     description: String,
     instance_id: String,
+    stub_instance_id: Option<String>,
     persisted_guid: Option<String>,
     #[serde(rename = "ClientIPAddress")]
     client_ip_address: Option<String>,
 }
 
-fn parse_local_devices(content: &str) -> Result<Vec<UsbDevice>, String> {
+fn parse_local_devices(
+    content: &str,
+    mut origin: impl FnMut(&str) -> Result<Option<bool>, String>,
+) -> Result<Vec<UsbDevice>, String> {
     let state: LocalState = serde_json::from_str(content.trim_start_matches('\u{feff}'))
         .map_err(|error| format!("无法识别 usbipd-win 的 JSON 状态，请更新共享组件：{error}"))?;
     let id = Regex::new(r"(?i)VID_([0-9a-f]{4})&PID_([0-9a-f]{4})").unwrap();
     let mut devices = Vec::new();
     for item in state.devices {
-        let Some(bus_id) = item.bus_id.filter(|value| !value.is_empty()) else {
+        let Some(bus_id) = item.bus_id.as_ref().filter(|value| !value.is_empty()) else {
             continue;
         };
         validate_bus_id(&bus_id)?;
+        // Exported physical USB may currently be represented by usbipd's stub.
+        let present_id = item
+            .stub_instance_id
+            .as_deref()
+            .filter(|id| !id.is_empty())
+            .unwrap_or(&item.instance_id);
+        if origin(present_id)? != Some(false) {
+            continue;
+        }
         let matched = id
             .captures(&item.instance_id)
             .ok_or("USB 状态缺少有效的 VID/PID")?;
@@ -357,7 +371,7 @@ fn parse_local_devices(content: &str) -> Result<Vec<UsbDevice>, String> {
             item.description
         };
         devices.push(UsbDevice {
-            bus_id,
+            bus_id: bus_id.clone(),
             detail: classify(&name, &vid_pid),
             vid_pid,
             name,
@@ -370,7 +384,24 @@ fn parse_local_devices(content: &str) -> Result<Vec<UsbDevice>, String> {
 }
 
 fn query_local_devices(executable: &Path) -> Result<Vec<UsbDevice>, String> {
-    parse_local_devices(&ensure_success(run(executable, &["state"])?)?)
+    parse_local_devices(
+        &ensure_success(run(executable, &["state"])?)?,
+        usb_origin::is_imported,
+    )
+}
+
+fn validate_local_share_targets(bus_ids: &[String], devices: &[UsbDevice]) -> Result<(), String> {
+    for bus_id in bus_ids {
+        validate_bus_id(bus_id)?;
+        if !devices.iter().any(|device| &device.bus_id == bus_id) {
+            return Err(format!("设备 {bus_id} 不是可共享的本机 USB，可能来自远程挂载或已拔出。接收到的设备请在“连接”页管理，不能再次共享。"));
+        }
+    }
+    Ok(())
+}
+
+pub(crate) fn ensure_local_share_targets(usbipd: &Path, bus_ids: &[String]) -> Result<(), String> {
+    validate_local_share_targets(bus_ids, &query_local_devices(usbipd)?)
 }
 
 fn parse_remote_devices(content: &str) -> Vec<UsbDevice> {
@@ -463,6 +494,7 @@ fn share_devices_blocking(bus_ids: Vec<String>) -> Result<(), String> {
         .local_ip
         .ok_or("请先在“连接”页面创建或加入 EasyTier 连接")?;
     let usbipd = find_executable("usbipd.exe").ok_or("未安装 usbipd-win")?;
+    ensure_local_share_targets(&usbipd, &bus_ids)?;
     elevation::execute(elevation::PrivilegedTask::UsbShare {
         usbipd: usbipd.clone(),
         bus_ids: bus_ids.clone(),
@@ -809,6 +841,32 @@ fn attach_devices_blocking(
 }
 
 #[tauri::command]
+async fn detach_device(
+    target: detachment::DetachTarget,
+) -> Result<Vec<connections::AttachedDevice>, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        let _guard = operation_lock()
+            .try_lock()
+            .map_err(|_| "另一个 USB 或网络操作正在进行，请稍后重试".to_string())?;
+        sharing_session::require_ready()?;
+        let executable = find_executable("usbip.exe").ok_or("未安装 usbip-win2")?;
+        require_safe_usbip(&executable)?;
+        detachment::disconnect_one(
+            &target,
+            |port| {
+                ensure_success(run(&executable, &["detach", "--port", &port.to_string()])?)
+                    .map(|_| ())
+            },
+            connections::list_with_timeout,
+            Duration::from_secs(15),
+            Duration::from_millis(250),
+        )
+    })
+    .await
+    .map_err(|error| format!("后台操作失败：{error}"))?
+}
+
+#[tauri::command]
 async fn detach_all_devices() -> Result<(), String> {
     tauri::async_runtime::spawn_blocking(move || {
         let _guard = operation_lock()
@@ -991,6 +1049,7 @@ fn main() {
             list_remote_devices,
             list_attached_devices,
             attach_devices,
+            detach_device,
             detach_all_devices,
             set_auto_start,
             open_dependency_download
@@ -1019,7 +1078,7 @@ mod tests {
             {"BusId":"3-4","Description":"未共享","InstanceId":"USB\\VID_1234&PID_5679\\example","PersistedGuid":null,"ClientIPAddress":null},
             {"BusId":null,"Description":"已拔出","InstanceId":"USB\\VID_1234&PID_5679\\example","PersistedGuid":"test-guid","ClientIPAddress":null}
         ]});
-        let devices = parse_local_devices(&content.to_string()).unwrap();
+        let devices = parse_local_devices(&content.to_string(), |_| Ok(Some(false))).unwrap();
         assert_eq!(devices.len(), 3);
         assert_eq!(devices[0].name, "Redmi  K40 名称包含  双空格");
         assert_eq!(devices[0].vid_pid, "18d1:4ee7");
@@ -1030,9 +1089,65 @@ mod tests {
 
     #[test]
     fn malformed_local_state_is_not_an_empty_success() {
-        assert!(parse_local_devices("{}").is_err());
-        assert!(parse_local_devices("not json").is_err());
-        assert!(parse_local_devices(r#"{"Devices":[]}"#).unwrap().is_empty());
+        assert!(parse_local_devices("{}", |_| Ok(Some(false))).is_err());
+        assert!(parse_local_devices("not json", |_| Ok(Some(false))).is_err());
+        assert!(
+            parse_local_devices(r#"{"Devices":[]}"#, |_| Ok(Some(false)))
+                .unwrap()
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn imported_devices_are_not_shareable_even_with_the_same_model_and_serial() {
+        let content = serde_json::json!({"Devices": [
+            {"BusId":"1-1","Description":"Phone","InstanceId":"USB\\VID_18D1&PID_4EE7\\same","PersistedGuid":null,"ClientIPAddress":null},
+            {"BusId":"3-2","Description":"Phone","InstanceId":"USB\\VID_18D1&PID_4EE7\\same","StubInstanceId":"USB\\physical-stub","PersistedGuid":"guid","ClientIPAddress":"10.0.0.2"},
+            {"BusId":"3-3","Description":"Unplugged","InstanceId":"USB\\VID_18D1&PID_4EE7\\gone","PersistedGuid":null,"ClientIPAddress":null}
+        ]}).to_string();
+        let devices = parse_local_devices(&content, |id| match id {
+            "USB\\physical-stub" => Ok(Some(false)),
+            id if id.ends_with("gone") => Ok(None),
+            _ => Ok(Some(true)),
+        })
+        .unwrap();
+        assert_eq!(devices.len(), 1);
+        assert_eq!(devices[0].bus_id, "3-2");
+        assert!(devices[0].shared && devices[0].attached);
+        assert!(validate_local_share_targets(&["3-2".into()], &devices).is_ok());
+        let error =
+            validate_local_share_targets(&["3-2".into(), "1-1".into()], &devices).unwrap_err();
+        assert!(error.contains("1-1") && error.contains("不能再次共享"));
+        assert!(validate_local_share_targets(&["3-3".into()], &devices).is_err());
+        assert!(parse_local_devices(&content, |_| Err("device tree failed".into())).is_err());
+    }
+
+    #[test]
+    #[ignore = "read-only check against this computer's current Windows USB device tree"]
+    fn inspect_local_usb_origins() {
+        let usbipd = find_executable("usbipd.exe").expect("usbipd installed");
+        let content = ensure_success(run(&usbipd, &["state"]).unwrap()).unwrap();
+        let state: LocalState = serde_json::from_str(&content).unwrap();
+        let devices = parse_local_devices(&content, usb_origin::is_imported).unwrap();
+        for device in state.devices {
+            let Some(bus_id) = device.bus_id else {
+                continue;
+            };
+            let instance = device
+                .stub_instance_id
+                .as_deref()
+                .filter(|id| !id.is_empty())
+                .unwrap_or(&device.instance_id);
+            let imported = usb_origin::is_imported(instance).unwrap();
+            println!(
+                "{bus_id}: imported={imported:?}; visible={}",
+                devices.iter().any(|d| d.bus_id == bus_id)
+            );
+            assert_eq!(
+                devices.iter().any(|d| d.bus_id == bus_id),
+                imported == Some(false)
+            );
+        }
     }
 
     #[test]

@@ -194,8 +194,11 @@ fn dispatch(task: PrivilegedTask) -> Result<(), String> {
             bus_ids,
             mesh_ip,
         } => {
+            // Recheck after UAC: the UI snapshot may no longer describe this bus.
+            crate::ensure_local_share_targets(&usbipd, &bus_ids)?;
             configure_usb_access(&mesh_ip)?;
             for bus_id in bus_ids {
+                crate::ensure_local_share_targets(&usbipd, std::slice::from_ref(&bus_id))?;
                 let output = run(&usbipd, &["bind", "--busid", &bus_id])?;
                 if !output.status.success() {
                     let message = crate::text(&output);

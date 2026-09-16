@@ -2,6 +2,8 @@
 
 USBLink 是一个中文 Windows 桌面工具，为免费的 USB/IP 组件提供图形界面。它内置 EasyTier 加密组网，可以共享和连接任意数量的 USB 设备，不需要账号或命令行。
 
+完整版本变化见 [更新日志](CHANGELOG.md)。
+
 ## Windows 安装程序
 
 从 [GitHub Releases](https://github.com/cinitdev/USBLink/releases/latest) 下载 Windows x64 的 `Setup.exe` 安装包。双击打开中文安装向导，选择安装目录后完成安装；可创建开始菜单和桌面快捷方式，也可以从 Windows“设置 → 应用”中卸载。默认安装到当前用户目录。
@@ -18,10 +20,15 @@ USBLink 是一个中文 Windows 桌面工具，为免费的 USB/IP 组件提供�
 
 - 一台电脑在“连接”页创建配对码，另一台电脑输入配对码加入。
 - USB 所在电脑在“设备”页选择需要共享的设备。
+- “设备”页仅列出本机接入的 USB；接收到的远程虚拟 USB 在“连接”页查看和断开，不能再次共享。来源通过 Windows 父控制器识别，不按型号或设备编号去重。
+- 设备页支持“全部 / 手机 / 其他设备”分类及数量；全选、共享只处理当前分类，切换分类清空勾选。分类使用 USB 名称和系统描述，无法识别的设备归入“其他设备”，仍可在“全部”中查找。
 - 共享仅在本次运行期间有效；正常关闭 USBLink 会先停止共享并断开本机接收的 USB，重新打开后需要手动选择并共享。
 - 被控电脑在“连接”页选择远程电脑和需要连接的设备。
+- 已连接设备右侧可单独“断开”，其余设备继续使用，也保留“断开全部 USB”。断开期间显示进度，确认驱动释放所选挂载后才移除；失败保留设备并提示，支持手动重试。即使对方离线，也可以断开本机接收挂载。
 - “设置”页会显示内置 EasyTier，并检测 usbipd-win 和 usbip-win2。
 - 安装组件后返回 USBLink，状态会立即重新检测；设置页打开期间也会自动刷新。
+
+0.3.8 的交互改进覆盖三个页面：设备行可以直接共享，已共享设备不再进入全选；点击设备名称也能勾选，支持半选和清除选择，返回设备页保留当前分类。连接页支持行内连接/断开，远程电脑选择支持方向键、Esc 和点击外部关闭；配对码按 Enter 加入，错误保留在输入框下，可隐藏已展示的配对码，离开前明确确认。设置页的中继地址支持 Enter 保存、撤销修改和就地错误提示，保存期间锁定输入；组件刷新等待实际查询完成，驱动安装提示可分别收起。错误通知需主动关闭，通知避开底部主操作区；窄窗口、深色模式和减少动态效果偏好也已适配。
 
 ## 免费组件
 
@@ -72,7 +79,7 @@ cargo test --manifest-path src-tauri\Cargo.toml
 npm run tauri:build
 ```
 
-默认构建会生成 NSIS 安装包：`src-tauri\target\release\bundle\nsis\USBLink_0.2.20_x64-setup.exe`。安装器配置位于 `src-tauri/tauri.conf.json`，升级/卸载检查位于 `src-tauri/installer-hooks.nsh`，自定义模板来源及验证步骤见 [安装器维护说明](src-tauri/INSTALLER.md)。
+默认构建会生成 NSIS 安装包：`src-tauri\target\release\bundle\nsis\USBLink_0.3.8_x64-setup.exe`。安装器配置位于 `src-tauri/tauri.conf.json`，升级/卸载检查位于 `src-tauri/installer-hooks.nsh`，自定义模板来源及验证步骤见 [安装器维护说明](src-tauri/INSTALLER.md)。
 
 在没有运行中的 USBLink、没有现有安装和同名快捷方式的测试账户中，可以运行 `tests/installer-smoke.ps1` 验证静默安装、覆盖安装、文件校验、快捷方式、卸载注册及卸载后保留用户文件；脚本不启动应用，并恢复测试前的开机启动项。
 

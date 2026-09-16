@@ -59,7 +59,8 @@ async function scenario(fail = false) {
     await page.waitForFunction(() => !!window.singleTest.finishAttach);
     // Deliver stale empty snapshots after the user's one and only attach request.
     await page.evaluate(() => { const s = window.singleTest; s.finishMesh(); s.finishRemote(); s.finishPorts(); });
-    await page.getByRole("button", { name: "刷新", exact: true }).click();
+    assert.equal(await page.getByRole("button", { name: "刷新", exact: true }).isDisabled(), true);
+    await page.evaluate(() => window.dispatchEvent(new Event("focus")));
     assert.equal(await row.count(), 1, "pending connection must not clear the device row");
     assert.equal(await page.getByRole("button", { name: "正在连接…", exact: true }).isDisabled(), true);
     await page.evaluate(success => window.singleTest.finishAttach(success), !fail);

@@ -15,7 +15,7 @@ await page.addInitScript(() => {
   const state = { phone, attached: [], remoteError: false, portError: false, noPeers: false, calls: {}, pendingAttach: null };
   window.usbTest = state;
   window.__TAURI_INTERNALS__ = {
-    async invoke(command) {
+    async invoke(command, args = {}) {
       state.calls[command] = (state.calls[command] || 0) + 1;
       switch (command) {
         case "get_sharing_session": return { phase: "ready", ready: true, problem: null };
@@ -35,6 +35,11 @@ await page.addInitScript(() => {
           state.attached = [{ ...phone, host: peer.ip, port: 1, attached: true }];
           return state.attached.map(device => ({ ...device }));
         case "detach_all_devices": state.attached = []; return;
+        case "detach_device":
+          state.detachTarget = args.target;
+          await new Promise((resolve, reject) => { state.finishDetach = success => success ? resolve() : reject(new Error("模拟单设备断开失败")); });
+          state.attached = state.attached.filter(device => device.port !== args.target.port);
+          return state.attached.map(device => ({ ...device }));
         default: throw new Error("Unexpected command: " + command);
       }
     },
@@ -50,7 +55,8 @@ try {
   await page.waitForFunction(() => !!window.usbTest.pendingAttach);
   const remoteReads = await page.evaluate(() => window.usbTest.calls.list_remote_devices);
   await page.evaluate(() => { window.usbTest.remoteError = true; });
-  await page.getByRole("button", { name: "刷新", exact: true }).click();
+  assert.equal(await page.getByRole("button", { name: "刷新", exact: true }).isDisabled(), true);
+  await page.evaluate(() => window.dispatchEvent(new Event("focus")));
   assert.equal(await page.evaluate(() => window.usbTest.calls.list_remote_devices), remoteReads, "discovery waits for an in-progress import");
   assert.equal(await page.getByRole("button", { name: "正在连接…", exact: true }).isDisabled(), true);
   await page.evaluate(() => window.usbTest.pendingAttach());
@@ -96,11 +102,41 @@ try {
   assert.equal(await imported.getByText("已连接", { exact: true }).count(), 1);
   assert.equal(await imported.getByText("对方状态待确认", { exact: true }).count(), 5);
   await page.screenshot({ path: "ui-usb-six-devices-820.png" });
+  const other = imported.locator('.attached-row').filter({ hasText: '端口 2' });
+  const first = imported.locator('.attached-row').filter({ hasText: '端口 1' });
+  const allCalls = await page.evaluate(() => window.usbTest.calls.detach_all_devices || 0);
+  await other.getByRole('button', { name: /断开/ }).click();
+  await page.waitForFunction(() => !!window.usbTest.finishDetach);
+  assert.deepEqual(await page.evaluate(() => window.usbTest.detachTarget), { host: '10.126.126.3', port: 2, busId: '3-2', vidPid: '18d1:4ee7' });
+  assert.equal(await other.getAttribute('aria-busy'), 'true');
+  assert.equal(await first.getByRole('button', { name: /断开/ }).isDisabled(), true);
+  assert.equal(await imported.locator('.attached-row').count(), 6);
+  assert.equal(await page.getByRole('button', { name: '刷新', exact: true }).isDisabled(), true);
+  await page.evaluate(() => window.dispatchEvent(new Event('focus')));
+  assert.equal(await other.getAttribute('aria-busy'), 'true');
+  await page.screenshot({ path: 'test-results/usb-single-disconnect-pending-820.png' });
+  await page.evaluate(() => window.usbTest.finishDetach(true));
+  await other.waitFor({ state: 'detached' });
+  assert.equal(await imported.locator('.attached-row').count(), 5);
+  assert.equal(await first.getByRole('button', { name: /断开/ }).isEnabled(), true);
+  assert.equal(await page.evaluate(() => window.usbTest.calls.detach_all_devices || 0), allCalls);
+  assert.equal(await page.evaluate(() => window.usbTest.calls.detach_device), 1);
+  const failed = imported.locator('.attached-row').filter({ hasText: '端口 3' });
+  await failed.getByRole('button', { name: /断开/ }).click();
+  await page.waitForFunction(() => window.usbTest.detachTarget.port === 3);
+  await page.evaluate(() => window.usbTest.finishDetach(false));
+  await page.getByText('模拟单设备断开失败', { exact: true }).waitFor();
+  assert.equal(await imported.locator('.attached-row').count(), 5);
+  assert.equal(await failed.getByRole('button', { name: /断开/ }).isEnabled(), true);
+  assert.equal(await page.evaluate(() => window.usbTest.calls.detach_device), 2);
+  assert.equal(await page.evaluate(() => window.usbTest.calls.detach_all_devices || 0), allCalls);
+  await page.setViewportSize({ width: 1180, height: 760 });
+  await page.screenshot({ path: 'test-results/usb-single-disconnect-1180.png' });
   await page.evaluate(() => { window.usbTest.attached = []; });
   await page.getByRole("button", { name: "刷新", exact: true }).click();
   await imported.waitFor({ state: "detached" });
   assert.deepEqual(errors, []);
-  console.log("PASS: host Attached, pending attach, remote timeout, peer loss, port failure/recovery, detach, six hosts and actual empty snapshot; no browser errors.");
+  console.log("PASS: attach, peer loss, port failure/recovery, detach-all, single disconnect pending/success/failure, six hosts and actual empty snapshot; no browser errors.");
 } finally {
   await browser.close();
 }

@@ -18,6 +18,10 @@ impl AttachedDevice {
     pub(crate) fn matches(&self, host: &str, bus_id: &str) -> bool {
         self.host.eq_ignore_ascii_case(host) && self.device.bus_id == bus_id
     }
+
+    pub(crate) fn matches_identity(&self, host: &str, bus_id: &str, vid_pid: &str) -> bool {
+        self.matches(host, bus_id) && self.device.vid_pid.eq_ignore_ascii_case(vid_pid)
+    }
 }
 
 pub(crate) fn list() -> Result<Vec<AttachedDevice>, String> {

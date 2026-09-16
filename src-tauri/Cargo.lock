@@ -3720,7 +3720,7 @@ dependencies = [
 
 [[package]]
 name = "usblink"
-version = "0.2.20"
+version = "0.3.8"
 dependencies = [
  "base64 0.22.1",
  "hmac",
