@@ -2,7 +2,7 @@
 
 USBLink 是一个中文 Windows 桌面工具，为免费的 USB/IP 组件提供图形界面。它内置 EasyTier 加密组网，可以共享和连接任意数量的 USB 设备，不需要账号或命令行。
 
-本次预发行版本：**Windows 0.3.11 + Android 模块 0.3.3**。下载入口：[v0.3.11 发布页](https://github.com/cinitdev/USBLink/releases/tag/v0.3.11)。完整变更见 [发布说明](RELEASE_NOTES.md) 和 [更新日志](CHANGELOG.md)。
+本次正式发布版本：**Windows 0.3.11 + Android 模块 0.3.3**。下载入口：[v0.3.11 发布页](https://github.com/cinitdev/USBLink/releases/tag/v0.3.11)。完整变更见 [发布说明](RELEASE_NOTES.md) 和 [更新日志](CHANGELOG.md)。
 
 ## Android 手机模块（USB ADB 实验版）
 

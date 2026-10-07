@@ -9,6 +9,7 @@ When implementing from a selected generated mock, treat that image as the source
 ## Confirmed Product Direction
 
 - Product name: USBLink.
+- Publish v0.3.11 as a normal GitHub release and mark it latest (user decision, 2026-10-07). Document the Android module's experimental capabilities and validation limits separately from the release channel.
 - Target: a fully functional Chinese Windows desktop app distributed as a Chinese Windows installer (Setup.exe), with shortcuts and Windows uninstall registration. The default build must produce an installer, not only a portable executable.
 - Installer busy checks must let the user explicitly confirm ending the current user's USBLink processes and then continue (user decision, 2026-09-13). Explain that forced exit skips USB cleanup until the next app startup. Confirm process exit and session-lock release before proceeding; failed termination remains retryable/cancellable. Never kill silently: silent/passive installs must fail with code 1618 when busy.
 - Upgrades must default to updating in place without uninstalling, retaining pairing/settings, the existing install directory, shortcuts and enabled auto-start. Keep uninstall-first as an explicit alternative.

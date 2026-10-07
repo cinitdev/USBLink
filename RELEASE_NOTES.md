@@ -1,6 +1,6 @@
 # USBLink Windows 0.3.11 + Mobile 0.3.3
 
-发布日期：2026-10-07。此版本为预发行版，包含 Android 用户态 USB ADB 实验模块。汇总上一公开版本 v0.3.8 之后全部本地改动；Windows 与手机模块使用各自的版本号。
+发布日期：2026-10-07。此版本正式发布，包含 Android 用户态 USB ADB 实验模块。汇总上一公开版本 v0.3.8 之后全部本地改动；Windows 与手机模块使用各自的版本号。
 
 ## 下载与安装
 
@@ -54,7 +54,7 @@ Windows 默认直接更新，保留配对与设置。运行占用时，经用户
 - 独立 K40 / Android 12 / APatch 试验已验证驱动绑定、RSA 认证、64 MiB 双向传输和清理；用户反馈早期整合模块可用。最新重启修复的刷入重启、Android Studio 安装 APK 及不同品牌 ROM 尚未完成真机验收。
 - **不支持 MTP 便携设备、资源管理器浏览手机存储、Fastboot、外接 U 盘或外接手机共享。** 不能从 ADB 成功推断完整 USB 手机兼容。天玑等 ARM64 机型尚未实测。
 - 不承诺原 Windows USB/IP 大 APK 传输掉线已被此次发布彻底修复；网络、ROM 和第三方驱动仍可能影响连接。USB 枚举可能产生正常设备提示音。
-- 实验 USB 标识只在显式实验构建中纳入；此预发行不代表完成正式产品 USB 标识或通用驱动认证。
+- 实验 USB 标识只在显式实验构建中纳入；Android 模块尚未完成正式产品 USB 标识或通用驱动认证。
 - 第三方 EasyTier 二进制保持未修改，ZIP 和 EXE 附许可证与对应源代码链接。详细说明见仓库 THIRD_PARTY_NOTICES.md 和 mobile/vendor/easytier/NOTICE.md。
 
-完整迭代记录见 [CHANGELOG.md](https://github.com/cinitdev/USBLink/blob/v0.3.11/CHANGELOG.md)；模块架构、构建和兼容旧 TCP 路径见 [mobile/README.md](https://github.com/cinitdev/USBLink/blob/v0.3.11/mobile/README.md)。本次测试结果与产物校验见 [发布验证记录](https://github.com/cinitdev/USBLink/blob/v0.3.11/mobile/docs/release-v0.3.11-validation.md)。
+完整迭代记录见 [CHANGELOG.md](https://github.com/cinitdev/USBLink/blob/main/CHANGELOG.md)；模块架构、构建和兼容旧 TCP 路径见 [mobile/README.md](https://github.com/cinitdev/USBLink/blob/main/mobile/README.md)。本次测试结果与产物校验见 [发布验证记录](https://github.com/cinitdev/USBLink/blob/main/mobile/docs/release-v0.3.11-validation.md)。

@@ -6,7 +6,7 @@
 
 ## 当前发布：USB ADB 实验模块 0.3.3
 
-下载：[Windows 0.3.11 + Mobile 0.3.3 预发行版](https://github.com/cinitdev/USBLink/releases/tag/v0.3.11)。手机安装 `USBLink-Mobile-0.3.3-usb-adb-experimental-arm64.zip`，电脑安装 `USBLink-0.3.11-x64-Setup.exe`。已使用 Windows 0.3.11 时无需重复安装。
+下载：[Windows 0.3.11 + Mobile 0.3.3 正式发布版](https://github.com/cinitdev/USBLink/releases/tag/v0.3.11)。手机安装 `USBLink-Mobile-0.3.3-usb-adb-experimental-arm64.zip`，电脑安装 `USBLink-0.3.11-x64-Setup.exe`。已使用 Windows 0.3.11 时无需重复安装。
 
 1. 在 APatch 模块页覆盖安装 ZIP，按管理器提示完成更新或重启。同一 USB 实验通道的组网配置和共享开关会保留；从旧 TCP 模块升级时不会自动开启新 USB 通道。
 2. 手机开发者选项开启普通 **USB 调试**，不需要无线调试，也不要求手机接到另一台电脑上。
