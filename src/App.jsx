@@ -2,7 +2,7 @@ import { useCallback, useEffect, useId, useMemo, useRef, useState } from "react"
 import {
   Add20Regular, ArrowClockwise20Regular, ArrowRight20Regular, ArrowSync20Regular,
   Checkmark16Regular, ChevronDown16Regular, Copy20Regular,
-  Desktop20Regular, Dismiss16Regular, ErrorCircle20Regular, Key20Regular,
+  Desktop20Regular, Phone20Regular, Dismiss16Regular, ErrorCircle20Regular, Key20Regular,
   Link20Regular, LockClosed16Filled, NetworkCheck20Regular,
   Open20Regular, PlugConnected20Regular, PlugDisconnected20Regular, Power20Regular,
   Settings20Regular, ShieldCheckmark20Filled, Storage20Regular, UsbPlug20Regular,
@@ -11,16 +11,17 @@ import { invoke } from "@tauri-apps/api/core";
 import { useAttachedDevices } from "./useAttachedDevices.js";
 import { applyAttachedState, sameDevice } from "./usb-state.mjs";
 import { isPhoneDevice } from "./device-categories.mjs";
-import { canUsePeer, mergePeerPresence, mountPresence } from "./peer-state.mjs";
+import { canUsePeer, mergePeerPresence, mountPresence, peerStatusLabel, adbConnectCommand } from "./peer-state.mjs";
 import { readStored, readBoolean, writeStored, removeStored, normalizeRelay } from "./preferences.mjs";
 
 const nativeApp = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const previewUnpaired = !nativeApp && new URLSearchParams(window.location.search).has("unpaired");
 const previewLegacy = !nativeApp && new URLSearchParams(window.location.search).has("legacy");
+const previewAndroid = !nativeApp && new URLSearchParams(window.location.search).get("android");
 const defaultRelay = "tcp://183.230.36.171:11010";
 const legacyRelay = "tcp://public.easytier.top:11010";
 const demoPairingCode = "USBLINK1-eyJ2ZXJzaW9uIjoxLCJuZXR3b3JrX25hbWUiOiJ1c2JsaW5rLWRlbW8iLCJuZXR3b3JrX3NlY3JldCI6ImRlbW8iLCJyZWxheSI6InRjcDovL3B1YmxpYy5lYXN5dGllci50b3A6MTEwMTAifQ";
-const demoPeers = [{ name: "OFFICE-PC", ip: "10.126.126.2", online: true, os: "windows", latency: "3.5", tunnel: "udp" }];
+const demoPeers = previewAndroid ? [{ name: "USBLink-Android", ip: "10.126.126.2", online: previewAndroid !== 'offline', usbReady: previewAndroid === 'usb', usbKind: previewAndroid.startsWith('usb') ? 'android-adb-experimental' : 'usbip', os: 'android', adbReady: previewAndroid === 'ready', adbState: previewAndroid, latency: '3.5', tunnel: 'udp' }] : [{ name: "OFFICE-PC", ip: "10.126.126.2", online: true, os: "windows", latency: "3.5", tunnel: "udp" }];
 const demoMesh = previewUnpaired
   ? { configured: false, running: false, localIp: null, networkName: null, relay: defaultRelay, peerCount: 0, peers: [], pairingCode: null, problem: null, needsRepair: false }
   : previewLegacy
@@ -82,7 +83,9 @@ function stabilizeRemoteNames(host, devices, cache) {
     const key = `${host}|${device.busId}|${device.vidPid}`;
     const remembered = cache[key];
     const name = typeof device.name === "string" ? device.name.trim() : "";
-    if (device.friendlyName && name && name !== "Android 调试设备") {
+    // An authenticated source may deliberately return a generic name when the
+    // device identity is ambiguous. Never override that with an old port name.
+    if (device.friendlyName && name) {
       const detail = device.detail || device.vidPid;
       if (!remembered || remembered.name !== name || remembered.detail !== detail) {
         cache[key] = { name, detail };
@@ -292,7 +295,7 @@ export default function App() {
     remotePending.current = { host: selectedPeerIp, request };
     setRemoteLoading(true);
     try {
-      const fallback = demoDevices.map((item) => ({ ...item, shared: true }));
+      const fallback = previewAndroid === 'usb' ? [{busId:'99-1',vidPid:'18d1:4ee7',name:'Redmi K40 · USB ADB（实验）',detail:'手机 · USB ADB 实验通道',shared:true,friendlyName:true}] : demoDevices.map((item) => ({ ...item, shared: true }));
       const next = await backend("list_remote_devices", { host: selectedPeerIp }, fallback);
       if (request !== remoteRequest.current || selectedPeerIp !== currentPeerIp.current) return;
       const resolved = stabilizeRemoteNames(selectedPeerIp, next, remoteNameCache.current);
@@ -679,9 +682,9 @@ function PeerPicker({ selectedPeer, peers, open, setOpen, select, compact = fals
   };
   return <div ref={root} onKeyDown={navigate} className={`peer-wrap ${compact ? "compact" : ""}`}>
     <button ref={trigger} className="peer-picker" disabled={disabled} aria-haspopup="listbox" aria-expanded={open} aria-controls={open ? menuId : undefined} onClick={() => setOpen(!open)}>
-      <Desktop20Regular /><div><strong title={selectedPeer?.name}>{selectedPeer?.name || "选择电脑"}</strong><span>{selectedPeer ? `${selectedPeer.ip} · ${selectedPeer.online ? "USBLink 在线" : "USBLink 未运行或不可达"}` : "等待对方加入"}</span></div><StatusDot online={!!selectedPeer?.online} /><ChevronDown16Regular />
+      {selectedPeer?.os === 'android' ? <Phone20Regular /> : <Desktop20Regular />}<div><strong title={selectedPeer?.name}>{selectedPeer?.name || "选择设备"}</strong><span>{selectedPeer ? `${selectedPeer.ip} · ${peerStatusLabel(selectedPeer)}` : "等待对方加入"}</span></div><StatusDot online={!!selectedPeer?.online} /><ChevronDown16Regular />
     </button>
-    {open && <div id={menuId} className="peer-menu" role="listbox" aria-label="远程电脑">{peers.length ? peers.map(peer => <button role="option" tabIndex={-1} aria-selected={peer.ip === selectedPeer?.ip} key={peer.ip} onClick={() => { select(peer.ip); close(); }}><StatusDot online={!!peer.online} /><span><strong>{peer.name}</strong><small>{peer.ip} · {peer.online ? "USBLink 在线" : "USBLink 未运行或不可达"}</small></span>{peer.ip === selectedPeer?.ip && <Checkmark16Regular />}</button>) : <p>还没有发现其他 USBLink 电脑</p>}</div>}
+    {open && <div id={menuId} className="peer-menu" role="listbox" aria-label="远程设备">{peers.length ? peers.map(peer => <button role="option" tabIndex={-1} aria-selected={peer.ip === selectedPeer?.ip} key={peer.ip} onClick={() => { select(peer.ip); close(); }}><StatusDot online={!!peer.online} /><span><strong>{peer.name}</strong><small>{peer.ip} · {peerStatusLabel(peer)}</small></span>{peer.ip === selectedPeer?.ip && <Checkmark16Regular />}</button>) : <p>还没有发现其他 USBLink 设备</p>}</div>}
   </div>;
 }
 
@@ -737,21 +740,38 @@ function ConnectionPage({ activeBusIds, joinProblem, hidePairingCode, openingDow
   const available = devices.filter((device) => !device.attached);
   const all = available.length > 0 && available.every((device) => selected.has(device.busId));
   const onlineCount = peers.filter(peer => peer.online).length;
+  const usbPhone = selectedPeer?.os === "android" && selectedPeer?.usbKind === "android-adb-experimental";
+  const androidPeer = selectedPeer?.os === "android" && !usbPhone;
   const mountsUnavailable = attached.devices.some(device => mountPresence(device, peers, mesh.running) !== "已连接");
   const imported = <AttachedDevices snapshot={attached} stopAll={stopAll} stopDevice={stopDevice} detachingDevice={detachingDevice} busy={busy} peers={peers} networkReady={mesh.running} />;
   if (!mesh.configured) return <><PageHeader title="连接" subtitle={mesh.problem || "无需注册账号，使用配对码连接两台电脑"} tone={mesh.problem ? "error" : "normal"} icon={NetworkCheck20Regular} onRefresh={refresh} disabled={!!busy} /><div className="connection-content unpaired-content">{imported}<PairingSetup joinProblem={joinProblem} createNetwork={createNetwork} joinNetwork={joinNetwork} joinCode={joinCode} setJoinCode={setJoinCode} busy={busy} /></div></>;
   return <><PageHeader title="连接" subtitle={mesh.problem || (mesh.running ? "EasyTier 加密网络已启动" : "EasyTier 网络正在启动")} tone={mesh.problem ? "error" : "normal"} icon={mesh.problem ? ErrorCircle20Regular : NetworkCheck20Regular} onRefresh={refresh} spinning={remoteLoading} disabled={!!busy} />
     <div className="connection-content">
-    <section className={`mesh-summary ${mesh.problem ? "problem" : ""}`}><div><span className="mesh-icon">{mesh.problem ? <ErrorCircle20Regular /> : <NetworkCheck20Regular />}</span><p><strong>{mesh.problem ? "连接失败" : mesh.running ? onlineCount ? "对方 USBLink 在线" : "暂无在线 USBLink" : "等待网络服务"}</strong><small>{mesh.problem || (mesh.running && !onlineCount ? "配对信息已保存，等待对方打开 USBLink" : mesh.localIp) || "正在分配虚拟地址"}</small></p></div><div className="mesh-meta"><span>应用响应已验证</span><strong>{onlineCount} 台电脑</strong></div><div className="mesh-actions">{mesh.needsRepair && <button className="primary-button compact" onClick={repairNetwork} disabled={!!busy}><ArrowClockwise20Regular />{busy === "mesh-repair" ? "正在修复…" : "修复连接"}</button>}<button className="secondary-button" onClick={revealAndCopyCode} disabled={!!busy}><Copy20Regular />{busy === "mesh-code" ? "正在复制…" : "复制配对码"}</button><button className="icon-button" title="重新启动网络" aria-label="重新启动网络" onClick={restartNetwork} disabled={!!busy}>{busy === "mesh-restart" ? <ArrowClockwise20Regular className="spin" /> : <Power20Regular />}</button><button className="danger-action" onClick={leaveNetwork} disabled={!!busy}>离开连接</button></div></section>
+    <section className={`mesh-summary ${mesh.problem ? "problem" : ""}`}><div><span className="mesh-icon">{mesh.problem ? <ErrorCircle20Regular /> : <NetworkCheck20Regular />}</span><p><strong>{mesh.problem ? "连接失败" : mesh.running ? onlineCount ? "对方 USBLink 在线" : "暂无在线 USBLink" : "等待网络服务"}</strong><small>{mesh.problem || (mesh.running && !onlineCount ? "配对信息已保存，等待对方打开 USBLink" : mesh.localIp) || "正在分配虚拟地址"}</small></p></div><div className="mesh-meta"><span>应用响应已验证</span><strong>{onlineCount} 台设备</strong></div><div className="mesh-actions">{mesh.needsRepair && <button className="primary-button compact" onClick={repairNetwork} disabled={!!busy}><ArrowClockwise20Regular />{busy === "mesh-repair" ? "正在修复…" : "修复连接"}</button>}<button className="secondary-button" onClick={revealAndCopyCode} disabled={!!busy}><Copy20Regular />{busy === "mesh-code" ? "正在复制…" : "复制配对码"}</button><button className="icon-button" title="重新启动网络" aria-label="重新启动网络" onClick={restartNetwork} disabled={!!busy}>{busy === "mesh-restart" ? <ArrowClockwise20Regular className="spin" /> : <Power20Regular />}</button><button className="danger-action" onClick={leaveNetwork} disabled={!!busy}>离开连接</button></div></section>
     {pairingCode && <div className="pairing-code-band"><Key20Regular /><input aria-label="当前配对码" readOnly value={pairingCode} /><button className="text-action" disabled={!!busy} onClick={revealAndCopyCode}><Copy20Regular />复制</button><button className="text-action" disabled={!!busy} onClick={hidePairingCode}>隐藏配对码</button></div>}
     {imported}
     <section className="remote-source"><span>设备来源</span><PeerPicker disabled={!!busy} selectedPeer={selectedPeer} peers={peers} open={peerMenu} setOpen={setPeerMenu} select={setSelectedPeerIp} /></section>
-    {selectedPeer && !canUsePeer(selectedPeer) && <p className="usb-status-warning" role="status"><ErrorCircle20Regular />{selectedPeer.problem || (selectedPeer.online ? "USBLink 在线，但 USB 共享服务不可达" : "对方 USBLink 未运行或不可达，请双方更新并打开程序")}</p>}
-    {remoteProblem && <p className="usb-status-warning" role="status"><ErrorCircle20Regular />远程设备列表暂时无法更新：{remoteProblem}</p>}
-    {!environment.usbipInstalled ? <DependencyEmpty title="远程 USB 驱动尚未安装" text="安装免费的 usbip-win2 后即可连接远程 USB。" action={openingDownload === "usbip" ? "正在打开…" : "打开安装页面"} disabled={!!openingDownload} onClick={() => openDownload("usbip")} /> : !environment.usbipSafe ? <DependencyEmpty icon={ErrorCircle20Regular} title="远程 USB 驱动必须更新" text={environment.usbipProblem || "当前驱动存在系统崩溃风险，USBLink 已阻止连接。"} action={openingDownload === "usbip" ? "正在打开…" : "更新到 0.9.8.0"} disabled={!!openingDownload} onClick={() => openDownload("usbip")} /> : !selectedPeer ? <DependencyEmpty icon={Copy20Regular} title="等待另一台电脑加入" text="复制配对码发给对方，对方加入后会自动出现在这里。" action={busy === "mesh-code" ? "正在复制…" : "复制配对码"} disabled={!!busy} onClick={revealAndCopyCode} /> : <DeviceTable activeBusIds={activeBusIds} title="远程可用设备" remote devices={devices} selected={selected} all={all} onAll={() => setSelected(all ? new Set() : new Set(available.map((item) => item.busId)))} toggle={toggle} busy={busy} loading={remoteLoading} attach={attach} stopDevice={stopDevice} mounts={attached.devices} host={selectedPeer?.ip} detachingDevice={detachingDevice} unavailable={!mesh.running || !canUsePeer(selectedPeer) || !!remoteProblem || !attached.ready || !!attached.problem} connectionKnown={attached.ready && !attached.problem && mesh.running && canUsePeer(selectedPeer)} peerProblem={!selectedPeer.online ? "对方 USBLink 未运行或不可达" : selectedPeer.usbReady === false ? "共享服务不可达" : ""} />}
+    {selectedPeer && !androidPeer && !canUsePeer(selectedPeer) && <p className="usb-status-warning" role="status"><ErrorCircle20Regular />{selectedPeer.problem || (selectedPeer.online ? "USBLink 在线，但 USB 共享服务不可达" : "对方 USBLink 未运行或不可达，请双方更新并打开程序")}</p>}
+    {usbPhone && <p className="usb-status-warning" role="status"><Phone20Regular />USB ADB 实验通道 · 连接后由电脑现有 ADB 识别，首次需在手机授权。暂不支持 MTP 便携设备。</p>}
+    {!androidPeer && remoteProblem && <p className="usb-status-warning" role="status"><ErrorCircle20Regular />远程设备列表暂时无法更新：{remoteProblem}</p>}
+    {androidPeer ? <AndroidPeerPanel peer={selectedPeer} networkReady={mesh.running} /> : !environment.usbipInstalled ? <DependencyEmpty title="远程 USB 驱动尚未安装" text="安装免费的 usbip-win2 后即可连接远程 USB。" action={openingDownload === "usbip" ? "正在打开…" : "打开安装页面"} disabled={!!openingDownload} onClick={() => openDownload("usbip")} /> : !environment.usbipSafe ? <DependencyEmpty icon={ErrorCircle20Regular} title="远程 USB 驱动必须更新" text={environment.usbipProblem || "当前驱动存在系统崩溃风险，USBLink 已阻止连接。"} action={openingDownload === "usbip" ? "正在打开…" : "更新到 0.9.8.0"} disabled={!!openingDownload} onClick={() => openDownload("usbip")} /> : !selectedPeer ? <DependencyEmpty icon={Copy20Regular} title="等待另一台电脑加入" text="复制配对码发给对方，对方加入后会自动出现在这里。" action={busy === "mesh-code" ? "正在复制…" : "复制配对码"} disabled={!!busy} onClick={revealAndCopyCode} /> : <DeviceTable activeBusIds={activeBusIds} title="远程可用设备" remote devices={devices} selected={selected} all={all} onAll={() => setSelected(all ? new Set() : new Set(available.map((item) => item.busId)))} toggle={toggle} busy={busy} loading={remoteLoading} attach={attach} stopDevice={stopDevice} mounts={attached.devices} host={selectedPeer?.ip} detachingDevice={detachingDevice} unavailable={!mesh.running || !canUsePeer(selectedPeer) || !!remoteProblem || !attached.ready || !!attached.problem} connectionKnown={attached.ready && !attached.problem && mesh.running && canUsePeer(selectedPeer)} peerProblem={!selectedPeer.online ? "对方 USBLink 未运行或不可达" : selectedPeer.usbReady === false ? "共享服务不可达" : ""} />}
     </div>
-    <footer className="command-bar"><button className="text-action" onClick={stopAll} disabled={!!busy || (!attached.devices.length && !attached.problem)}>{busy === "detach" && !detachingDevice ? "正在断开全部…" : "断开全部 USB"}</button><div><strong>{busy === "attach" ? `正在连接 ${activeBusIds.length} 个设备` : selected.size ? `已选择 ${selected.size} 个设备` : attached.devices.length ? (attached.problem || mountsUnavailable ? "USB 连接状态待确认" : `已连接 ${attached.devices.length} 个远程 USB`) : "选择需要连接的设备"}</strong><span>{!environment.usbipSafe ? "请先安装或更新远程 USB 驱动" : !mesh.running ? "等待加密网络就绪" : selectedPeer && !canUsePeer(selectedPeer) ? "等待对方 USBLink 和共享服务就绪" : remoteProblem || attached.problem ? "请刷新并确认设备状态" : selectedPeer ? `来自 ${selectedPeer.name}` : "等待另一台电脑"}</span></div>{selected.size > 0 && <button className="text-action" disabled={!!busy} onClick={() => setSelected(new Set())}>清除选择</button>}<button className="primary-button" disabled={!mesh.running || !canUsePeer(selectedPeer) || !environment.usbipSafe || !attached.ready || !!attached.problem || !!remoteProblem || !selected.size || !selectedPeer || !!busy} onClick={() => attach()}><PlugConnected20Regular />{busy === "attach" ? "正在连接…" : "连接所选设备"}</button></footer>
+    {!androidPeer && <footer className="command-bar"><button className="text-action" onClick={stopAll} disabled={!!busy || (!attached.devices.length && !attached.problem)}>{busy === "detach" && !detachingDevice ? "正在断开全部…" : "断开全部 USB"}</button><div><strong>{busy === "attach" ? `正在连接 ${activeBusIds.length} 个设备` : selected.size ? `已选择 ${selected.size} 个设备` : attached.devices.length ? (attached.problem || mountsUnavailable ? "USB 连接状态待确认" : `已连接 ${attached.devices.length} 个远程 USB`) : "选择需要连接的设备"}</strong><span>{!environment.usbipSafe ? "请先安装或更新远程 USB 驱动" : !mesh.running ? "等待加密网络就绪" : selectedPeer && !canUsePeer(selectedPeer) ? "等待对方 USBLink 和共享服务就绪" : remoteProblem || attached.problem ? "请刷新并确认设备状态" : selectedPeer ? `来自 ${selectedPeer.name}` : "等待另一台电脑"}</span></div>{selected.size > 0 && <button className="text-action" disabled={!!busy} onClick={() => setSelected(new Set())}>清除选择</button>}<button className="primary-button" disabled={!mesh.running || !canUsePeer(selectedPeer) || !environment.usbipSafe || !attached.ready || !!attached.problem || !!remoteProblem || !selected.size || !selectedPeer || !!busy} onClick={() => attach()}><PlugConnected20Regular />{busy === "attach" ? "正在连接…" : "连接所选设备"}</button></footer>}
   </>;
+}
+
+function AndroidPeerPanel({ peer, networkReady }) {
+  const command = networkReady ? adbConnectCommand(peer) : '';
+  const [copied, setCopied] = useState(false);
+  const [copyError, setCopyError] = useState('');
+  useEffect(() => { setCopied(false); setCopyError(''); }, [command]);
+  const ready = !!command;
+  const title = !networkReady || !peer.online ? '手机状态未确认' : ready ? '手机 ADB 共享已就绪' : peer.adbState === 'off' ? '手机在线，共享已关闭' : peer.adbState === 'preparing' ? '手机在线，正在准备共享' : '手机在线，共享未就绪';
+  return <section className="android-peer-panel" aria-label="手机调试共享"><div className="android-peer-heading"><Phone20Regular /><div><h2>{title}</h2><p>使用电脑现有的 ADB / Android Studio 调试这部手机。</p></div><StatusDot online={ready} /></div>
+    {ready ? <><label htmlFor="phone-adb-command">电脑连接命令</label><div className="android-adb-command"><input id="phone-adb-command" readOnly value={command} /><button className="secondary-button" onClick={async () => { try { await copyText(command); setCopied(true); setCopyError(''); } catch { setCopyError('复制失败，请选中命令手动复制'); } }}>{copied ? <Checkmark16Regular /> : <Copy20Regular />}{copied ? '已复制' : '复制命令'}</button></div><p>执行后，在手机上确认电脑 RSA 授权。这里表示共享通道就绪，实际调试连接请在 ADB 或 Android Studio 中查看。</p></> : <p role="status">{!networkReady ? '本机网络未就绪，请先恢复加密连接。' : !peer.online ? '等待手机模块重新响应；仅加入设备网络不能证明共享服务在线。' : peer.adbState === 'off' ? '请在手机模块 WebUI 的设备页开启“共享本机调试”。' : peer.problem || '请在手机 WebUI 检查 USB 调试、共享开关与服务状态。'}</p>}
+    {copyError && <p className="usb-status-warning" role="alert">{copyError}</p>}
+    <p className="android-peer-note">手机模块目前提供本机 ADB 调试共享，未提供 USB/IP、外接 U 盘或外接手机共享，无需安装远程 USB 驱动。</p>
+  </section>;
 }
 
 function PairingSetup({ createNetwork, joinNetwork, joinCode, setJoinCode, joinProblem, busy }) {

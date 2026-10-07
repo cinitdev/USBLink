@@ -2,11 +2,23 @@
 
 USBLink 是一个中文 Windows 桌面工具，为免费的 USB/IP 组件提供图形界面。它内置 EasyTier 加密组网，可以共享和连接任意数量的 USB 设备，不需要账号或命令行。
 
-完整版本变化见 [更新日志](CHANGELOG.md)。
+本次预发行版本：**Windows 0.3.11 + Android 模块 0.3.3**。下载入口：[v0.3.11 发布页](https://github.com/cinitdev/USBLink/releases/tag/v0.3.11)。完整变更见 [发布说明](RELEASE_NOTES.md) 和 [更新日志](CHANGELOG.md)。
+
+## Android 手机模块（USB ADB 实验版）
+
+新增独立的 [USBLink Mobile](mobile/README.md)，作者为 **一只小柒夏**，要求 **Android 12 及以上（API 31+）、ARM64、Root 和 APatch / KernelSU**。模块使用 DEX JAR + `app_process` 和蓝白／藏蓝手机 WebUI，没有独立 APK；低于 Android 12 会拒绝安装。
+
+手机与电脑加入同一个 USBLink 网络，在手机开启“共享这台手机”，再在 Windows 0.3.11 的“连接”页选择手机、点击“连接设备”。首次连接需在手机确认 RSA 调试授权；复用电脑现有的 ADB / Android Studio，无需 `adb connect`，USBLink 不启动另一套桌面 ADB。
+
+该模块通过用户态 USB 模拟提供 **Android ADB Interface**，尚不支持 MTP 便携设备／资源管理器浏览手机存储、Fastboot、U 盘或外接手机共享。实测目标是 Redmi K40／Android 12／APatch；其他品牌、ROM 和天玑机型尚未完成真机验证，不能仅凭 ARM64 就保证兼容。
+
+手机共享开关会保存，重启后等待系统与防护规则就绪再恢复共享，等待期间可以关闭；日常启停无需重启手机。启停会重启系统 adbd，现有调试可能短暂中断。状态自动同步，共享时每 2 秒、关闭时每 5 秒，返回 WebUI 立即同步。电脑掉线后仍需手动连接，不会自动重挂载。
 
 ## Windows 安装程序
 
-从 [GitHub Releases](https://github.com/cinitdev/USBLink/releases/latest) 下载 Windows x64 的 `Setup.exe` 安装包。双击打开中文安装向导，选择安装目录后完成安装；可创建开始菜单和桌面快捷方式，也可以从 Windows“设置 → 应用”中卸载。默认安装到当前用户目录。
+本次配套安装文件为 `USBLink-0.3.11-x64-Setup.exe` 和 `USBLink-Mobile-0.3.3-usb-adb-experimental-arm64.zip`。已有 Windows 0.3.11 的用户只需更新模块；更旧电脑版需要更新才能识别实验 USB 手机。旧 Mobile 0.2.2 的 TCP 共享状态仍兼容显示，但它与本次点击连接的 USB 实验通道不同。
+
+从 [本次发布页](https://github.com/cinitdev/USBLink/releases/tag/v0.3.11) 下载 Windows x64 的 `Setup.exe` 安装包。双击打开中文安装向导，选择安装目录后完成安装；可创建开始菜单和桌面快捷方式，也可以从 Windows“设置 → 应用”中卸载。默认安装到当前用户目录。发布页附有 SHA-256 校验文件。
 
 安装包会检查 WebView2，缺失时联网下载并安装。USB 驱动仍通过应用“设置”页安装；EasyTier 和许可证已包含在程序及安装资源中。已开启的开机启动项会指向新的安装路径。
 
@@ -45,6 +57,14 @@ USB/IP 自带的远程设备列表有时只会按 VID/PID 显示通用名称，�
 
 设备进入已连接状态后，共享端仍会发布真实名称，接收端也会记住经过配对验证的名称；名称接口短暂不可用时，不会再从 Redmi K40 退回“Android 调试设备”。
 
+### 手机在 fastboot / fastbootd 下的名称（0.3.9）
+
+型号识别使用通用的 Windows 设备属性，没有按品牌、VID/PID 或端口套用机型表。共享端优先读取设备及其自身子接口提供的型号、产品名称；当 Windows 确认设备具有唯一 USB 序列号时，记住具体名称。先在正常系统下让新版 USBLink 识别到型号，切换 fastboot / fastbootd 后，如果固件继续提供相同的有效序列号，即使 VID/PID 改变，也能沿用已识别的名称，并同步给接收端。型号代码（如 CPH2581、SM-S918B）会按设备报告的原文显示，不猜测对应的商品名。
+
+首次就以 fastboot 接入、设备未提供型号、序列号变化/缺失/通用占位，或发现重复序列号与名称冲突时，可能仍显示 Android 或驱动原名。无法仅凭通用 USB 描述可靠区分 fastboot 和 fastbootd；本功能不承诺所有品牌或固件均可识别。它只读取 Windows 属性，不运行 ADB/fastboot，不打开手机通信通道，也不切换模式或重新挂载设备。
+
+名称记录保存在共享电脑当前用户的 `%LOCALAPPDATA%\USBLink\device-names.dat`，使用 Windows DPAPI 加密；仅保留身份摘要，不把原始序列号传给前端或对端。记录上限为 512 条，180 天未见会过期。读取失败时退回设备原名，写入失败时本次运行仍可记忆。升级后需要在手机所在电脑运行新版；建议两端一起更新，以便正确处理无法确认型号时的通用名称。当前自动测试覆盖多个品牌的模拟数据，尚未完成各品牌真机的 fastboot / fastbootd 验证。
+
 管理员操作由 USBLink 使用 Windows 原生 `ShellExecuteExW` 完成，不依赖 PowerShell。EasyTier 服务和 USB 共享命令由隐藏的 USBLink 管理员辅助进程直接执行，防火墙配置使用 Windows 自带的 `netsh.exe`。
 
 EasyTier 默认连接两个经过实际握手验证的社区节点：国内 `tcp://183.230.36.171:11010`，海外备用 `tcp://107.172.5.203:11010`。它会优先建立 P2P 直连，穿透失败时社区节点可能转发经过加密的流量。可以在设置页替换首选节点。
@@ -79,7 +99,7 @@ cargo test --manifest-path src-tauri\Cargo.toml
 npm run tauri:build
 ```
 
-默认构建会生成 NSIS 安装包：`src-tauri\target\release\bundle\nsis\USBLink_0.3.8_x64-setup.exe`。安装器配置位于 `src-tauri/tauri.conf.json`，升级/卸载检查位于 `src-tauri/installer-hooks.nsh`，自定义模板来源及验证步骤见 [安装器维护说明](src-tauri/INSTALLER.md)。
+默认构建会生成 NSIS 安装包：`src-tauri\target\release\bundle\nsis\USBLink_0.3.11_x64-setup.exe`。安装器配置位于 `src-tauri/tauri.conf.json`，升级/卸载检查位于 `src-tauri/installer-hooks.nsh`，自定义模板来源及验证步骤见 [安装器维护说明](src-tauri/INSTALLER.md)。
 
 在没有运行中的 USBLink、没有现有安装和同名快捷方式的测试账户中，可以运行 `tests/installer-smoke.ps1` 验证静默安装、覆盖安装、文件校验、快捷方式、卸载注册及卸载后保留用户文件；脚本不启动应用，并恢复测试前的开机启动项。
 

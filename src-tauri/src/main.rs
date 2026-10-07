@@ -19,6 +19,7 @@ mod attachment_preflight;
 mod connections;
 mod detachment;
 mod device_metadata;
+mod device_names;
 mod elevation;
 mod mesh;
 mod peer_health;
@@ -337,14 +338,15 @@ struct LocalStateDevice {
     client_ip_address: Option<String>,
 }
 
-fn parse_local_devices(
+fn parse_local_devices_with_names(
     content: &str,
     mut origin: impl FnMut(&str) -> Result<Option<bool>, String>,
+    names: impl FnOnce(&[LocalStateDevice]) -> Vec<String>,
 ) -> Result<Vec<UsbDevice>, String> {
     let state: LocalState = serde_json::from_str(content.trim_start_matches('\u{feff}'))
         .map_err(|error| format!("无法识别 usbipd-win 的 JSON 状态，请更新共享组件：{error}"))?;
     let id = Regex::new(r"(?i)VID_([0-9a-f]{4})&PID_([0-9a-f]{4})").unwrap();
-    let mut devices = Vec::new();
+    let mut local = Vec::new();
     for item in state.devices {
         let Some(bus_id) = item.bus_id.as_ref().filter(|value| !value.is_empty()) else {
             continue;
@@ -359,20 +361,33 @@ fn parse_local_devices(
         if origin(present_id)? != Some(false) {
             continue;
         }
+        local.push(item);
+    }
+    // Optional display metadata is resolved only after checking physical ancestry.
+    let resolved = names(&local);
+    let mut devices = Vec::new();
+    for (index, item) in local.into_iter().enumerate() {
         let matched = id
             .captures(&item.instance_id)
             .ok_or("USB 状态缺少有效的 VID/PID")?;
         let vid_pid = format!("{}:{}", &matched[1], &matched[2]).to_ascii_lowercase();
         let attached = item.client_ip_address.is_some();
         let shared = attached || item.persisted_guid.is_some();
-        let name = if item.description.trim().is_empty() {
+        let description = resolved.get(index).unwrap_or(&item.description);
+        let name = if description.trim().is_empty() {
             format!("USB 设备 {vid_pid}")
         } else {
-            item.description
+            description.clone()
         };
+        let mut detail = classify(&name, &vid_pid);
+        if detail.starts_with("USB 设备 ·") {
+            // Model codes such as CPH2581 need the original Android description
+            // for the existing Phones category; a model name is not a protocol.
+            detail = classify(&item.description, &vid_pid);
+        }
         devices.push(UsbDevice {
-            bus_id: bus_id.clone(),
-            detail: classify(&name, &vid_pid),
+            bus_id: item.bus_id.unwrap(),
+            detail,
             vid_pid,
             name,
             attached,
@@ -384,10 +399,20 @@ fn parse_local_devices(
 }
 
 fn query_local_devices(executable: &Path) -> Result<Vec<UsbDevice>, String> {
-    parse_local_devices(
+    parse_local_devices_with_names(
         &ensure_success(run(executable, &["state"])?)?,
         usb_origin::is_imported,
+        device_names::resolve,
     )
+}
+
+fn parse_local_devices(
+    content: &str,
+    origin: impl FnMut(&str) -> Result<Option<bool>, String>,
+) -> Result<Vec<UsbDevice>, String> {
+    parse_local_devices_with_names(content, origin, |items| {
+        items.iter().map(|item| item.description.clone()).collect()
+    })
 }
 
 fn validate_local_share_targets(bus_ids: &[String], devices: &[UsbDevice]) -> Result<(), String> {
@@ -401,7 +426,12 @@ fn validate_local_share_targets(bus_ids: &[String], devices: &[UsbDevice]) -> Re
 }
 
 pub(crate) fn ensure_local_share_targets(usbipd: &Path, bus_ids: &[String]) -> Result<(), String> {
-    validate_local_share_targets(bus_ids, &query_local_devices(usbipd)?)
+    // Elevated source validation must not read/write optional naming history.
+    let content = ensure_success(run(usbipd, &["state"])?)?;
+    validate_local_share_targets(
+        bus_ids,
+        &parse_local_devices(&content, usb_origin::is_imported)?,
+    )
 }
 
 fn parse_remote_devices(content: &str) -> Vec<UsbDevice> {
@@ -756,6 +786,7 @@ async fn list_remote_devices(host: String) -> Result<Vec<UsbDevice>, String> {
 
 fn query_remote_devices(host: String) -> Result<Vec<UsbDevice>, String> {
     validate_host(&host)?;
+    let peer=mesh::require_usb_peer(&host)?;
     let executable = find_executable("usbip.exe").ok_or("未安装 usbip-win2，请先在设置中安装")?;
     let output = run(&executable, &["list", "-r", &host])?;
     if !output.status.success() {
@@ -767,7 +798,11 @@ fn query_remote_devices(host: String) -> Result<Vec<UsbDevice>, String> {
         });
     }
     let mut devices = parse_remote_devices(&text(&output));
-    device_metadata::enrich_remote_devices(&host, &mut devices);
+    if peer.usb_kind=="android-adb-experimental" {
+        let export=presence::usb_export(&host)?;
+        devices.retain(|device|device.bus_id==export.bus_id && device.vid_pid.eq_ignore_ascii_case(&export.vid_pid));
+        for device in &mut devices {device.name=export.name.clone();device.friendly_name=true;device.detail="手机 · USB ADB 实验通道".into();}
+    } else {device_metadata::enrich_remote_devices(&host, &mut devices);}
     Ok(devices)
 }
 
@@ -812,14 +847,16 @@ fn attach_devices_blocking(
     let _guard = attach_lock()
         .lock()
         .map_err(|_| "USB 连接状态锁异常，请重新打开 USBLink".to_string())?;
-    mesh::require_usb_peer(&host)?;
+    let peer=mesh::require_usb_peer(&host)?;
     let receipt = std::cell::RefCell::new(None);
     attachment::connect(
         &host,
         &bus_ids,
         |bus_id| {
             *receipt.borrow_mut() = None;
-            attachment_preflight::prepare(&executable, &host, bus_id, &expected_vid_pids[bus_id], sharing_session::require_ready)?;
+            if peer.usb_kind=="android-adb-experimental" {
+                attachment_preflight::prepare_android(&executable, &host, bus_id, &expected_vid_pids[bus_id], sharing_session::require_ready)?;
+            } else {attachment_preflight::prepare(&executable, &host, bus_id, &expected_vid_pids[bus_id], sharing_session::require_ready)?;}
             mesh::require_usb_peer(&host)?;
             sharing_session::require_ready()?;
             // Another client action may have completed while the source settled.
@@ -1096,6 +1133,33 @@ mod tests {
                 .unwrap()
                 .is_empty()
         );
+    }
+
+    #[test]
+    fn model_enrichment_only_sees_local_devices_and_preserves_status_and_phone_category() {
+        let content = serde_json::json!({"Devices": [
+            {"BusId":"1-1","Description":"Android","InstanceId":"USB\\VID_18D1&PID_4EE7\\imported"},
+            {"BusId":"3-2","Description":"Android ADB Interface","InstanceId":"USB\\VID_18D1&PID_4EE7\\physical", "PersistedGuid":"shared"}
+        ]}).to_string();
+        let devices = parse_local_devices_with_names(
+            &content,
+            |id| Ok(Some(id.ends_with("imported"))),
+            |items| {
+                assert_eq!(items.len(), 1);
+                assert!(items[0].instance_id.ends_with("physical"));
+                vec!["CPH2581".into()]
+            },
+        )
+        .unwrap();
+        assert_eq!(devices[0].name, "CPH2581");
+        assert_eq!(devices[0].detail, "Android 设备 · 18d1:4ee7");
+        assert!(devices[0].shared && devices[0].friendly_name);
+        assert!(!devices[0].attached);
+        // Optional metadata absence retains the usbipd description and device.
+        let fallback =
+            parse_local_devices_with_names(&content, |_| Ok(Some(false)), |_| vec![]).unwrap();
+        assert_eq!(fallback.len(), 2);
+        assert_eq!(fallback[1].name, "Android ADB Interface");
     }
 
     #[test]

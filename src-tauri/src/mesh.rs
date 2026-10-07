@@ -83,6 +83,9 @@ pub struct MeshPeer {
     pub ip: String,
     pub online: bool,
     pub usb_ready: bool,
+    pub usb_kind: String,
+    pub adb_ready: bool,
+    pub adb_state: String,
     pub problem: Option<String>,
     pub os: String,
     pub latency: String,
@@ -607,8 +610,11 @@ fn parse_peers(values: &[Value]) -> (Option<String>, Vec<MeshPeer>, bool) {
             ip,
             online: false,
             usb_ready: false,
+            usb_kind: "usbip".into(),
+            adb_ready: false,
+            adb_state: "unavailable".into(),
             problem: Some("正在验证对方电脑是否在线".into()),
-            os: "windows".into(),
+            os: "unknown".into(),
             latency: item
                 .get("lat_ms")
                 .and_then(Value::as_str)
@@ -633,6 +639,10 @@ fn check_peer_health(peers: &mut [MeshPeer]) {
                     let health = crate::peer_health::probe(&peer.ip);
                     peer.online = health.online;
                     peer.usb_ready = health.usb_ready;
+                    peer.usb_kind = health.usb_kind.into();
+                    peer.os = health.os.into();
+                    peer.adb_ready = health.adb_ready;
+                    peer.adb_state = health.adb_state.into();
                     peer.problem = health.problem;
                 });
             }
@@ -640,7 +650,7 @@ fn check_peer_health(peers: &mut [MeshPeer]) {
     }
 }
 
-pub(crate) fn require_usb_peer(host: &str) -> Result<(), String> {
+pub(crate) fn require_usb_peer(host: &str) -> Result<crate::peer_health::Health, String> {
     if load_profile()?.is_none() {
         return Err("请先加入加密连接".into());
     }
@@ -649,8 +659,11 @@ pub(crate) fn require_usb_peer(host: &str) -> Result<(), String> {
         return Err("对方电脑已离线或已离开当前连接，请等待对方上线".into());
     }
     let health = crate::peer_health::probe(host);
+    if health.os == "android" && health.usb_kind != "android-adb-experimental" {
+        return Err("手机模块提供 ADB 调试共享，不支持 USB/IP 设备挂载".into());
+    }
     if health.usb_ready {
-        Ok(())
+        Ok(health)
     } else {
         Err(health
             .problem

@@ -1,0 +1,5 @@
+/build/
+/vendor/downloads/
+/vendor/easytier/bin/
+/webui/dist/
+*.class

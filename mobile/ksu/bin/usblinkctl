@@ -1,0 +1,12 @@
+#!/system/bin/sh
+MODDIR=${0%/bin/usblinkctl}
+case "$1" in ''|*[!a-z-]*) echo '{"ok":false,"error":"无效操作"}'; exit 1;; esac
+case "${2:-e30=}" in *[!A-Za-z0-9+/=]*) echo '{"ok":false,"error":"无效请求"}'; exit 1;; esac
+if [ "$1" = status ]; then
+  . "$MODDIR/bin/common.sh"
+  read_status && exit 0
+  echo '{"ok":false,"error":"后台状态尚未确认，服务可能正在启动、处理操作或已停止，请稍后刷新。"}'
+  exit 1
+fi
+export CLASSPATH="$MODDIR/lib/usblink-daemon.jar"
+exec /system/bin/app_process / --nice-name=usblink-ctl io.usblink.mobile.Main ctl "$1" "${2:-e30=}"

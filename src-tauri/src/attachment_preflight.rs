@@ -80,6 +80,25 @@ pub(crate) fn prepare(
     )
 }
 
+pub(crate) fn prepare_android(
+    executable: &std::path::Path, host:&str, bus_id:&str, expected_vid_pid:&str,
+    active:impl FnMut()->Result<(),String>,
+) -> Result<(),String> {
+    wait_until_ready(bus_id, |timeout| {
+        let signed=crate::presence::usb_export(host).map_err(QueryError::Unavailable)?;
+        if signed.bus_id!=bus_id || !signed.vid_pid.eq_ignore_ascii_case(expected_vid_pid) {
+            return Err(QueryError::InvalidDevice("手机共享设备已变化，请刷新后重新选择".into()));
+        }
+        let output=crate::process::run(executable,&["list","-r",host],timeout).map_err(QueryError::Unavailable)?;
+        let content=crate::ensure_success(output).map_err(QueryError::Unavailable)?;
+        let export=selected_export(&content,bus_id,expected_vid_pid).map_err(QueryError::InvalidDevice)?;
+        if export.as_ref().is_some_and(|record| record.path!=signed.path) {
+            return Err(QueryError::InvalidDevice("手机 USB 记录与认证来源不一致，未提交挂载".into()));
+        }
+        Ok(export)
+    },active)
+}
+
 fn wait_with_clock(
     bus_id: &str,
     mut read: impl FnMut(Duration) -> Result<Option<ExportIdentity>, QueryError>,

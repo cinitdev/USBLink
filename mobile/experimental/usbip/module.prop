@@ -1,0 +1,6 @@
+id=usblink-mobile
+name=USBLink Mobile · USB ADB 实验版
+version=0.3.3
+versionCode=303
+author=一只小柒夏
+description=用户态 USB ADB 实验版 · Android 12+ arm64 · 配合 USBLink 0.3.11 · APatch / KernelSU · 不支持 MTP / OTG

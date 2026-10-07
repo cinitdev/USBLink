@@ -1,0 +1,13 @@
+{
+  "version": "2.6.4",
+  "repository": "https://github.com/EasyTier/EasyTier",
+  "release": "https://github.com/EasyTier/EasyTier/releases/tag/v2.6.4",
+  "archive": "Easytier-Magisk-v2.6.4.zip",
+  "url": "https://github.com/EasyTier/EasyTier/releases/download/v2.6.4/Easytier-Magisk-v2.6.4.zip",
+  "archiveSize": 14099136,
+  "archiveSha256": "39a6b4fa21d9fdc83d3b38c90562f610c0986ecc089c4026c3be22a0ab27c5e5",
+  "files": [
+    {"name": "easytier-core", "size": 5910252, "sha256": "7bd504e87cad52edacb9ea84ece7397d0afb911101de623a3dfc4a4dbd9e6bb6"},
+    {"name": "easytier-cli", "size": 2421856, "sha256": "11cd0c957e41057a49e2580ce6490d7bef8bde0a04602e5bd80a4b17cb30b984"}
+  ]
+}

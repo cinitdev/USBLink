@@ -9,3 +9,4 @@
 # These upstream assets (including the license) have embedded SHA-256 checks.
 # Preserve their exact bytes on every checkout.
 src-tauri/vendor/easytier/** -text
+mobile/vendor/easytier/** -text

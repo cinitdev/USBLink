@@ -1,0 +1,6 @@
+id=usblink-mobile
+name=USBLink Mobile
+version=0.2.2
+versionCode=202
+author=一只小柒夏
+description=系统 adbd TCP 异地共享 · APatch / KernelSU · Android 12+ arm64 · WebUI

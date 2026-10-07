@@ -22,3 +22,5 @@ USBLink redistributes unmodified Windows binaries from EasyTier 2.6.4 as a separ
 - Official release archive SHA-256: `27AF91E270E554709B048BD32327FEFD2DFCE5062AE1E8701AF7550C6F525F84`
 
 The EasyTier files are not linked into USBLink and are not modified. USBLink extracts and launches them as separate processes/services.
+
+The Android companion also redistributes the unmodified ARM64 `easytier-core` and `easytier-cli` from the official `Easytier-Magisk-v2.6.4.zip`. Its original module scripts are not used. Archive and individual binary hashes, LGPL/GPL license texts, and the corresponding source archive are documented in [the Android notice](mobile/vendor/easytier/NOTICE.md) and included in the module's `licenses` directory. Fetch verified development binaries with `mobile/scripts/fetch-easytier.ps1`; generated binaries are excluded from Git.

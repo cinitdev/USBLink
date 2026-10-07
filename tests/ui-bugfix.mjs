@@ -60,7 +60,7 @@ async function fixture(options = {}) {
             }
             return snapshot;
           }
-          case "list_remote_devices": return [phone];
+          case "list_remote_devices": return structuredClone(state.remoteDevices || [phone]);
           case "list_attached_devices": return structuredClone(state.attached);
           case "ensure_mesh_service_current":
             if (options.holdMeshCheck && !state.repairedMesh) return new Promise((resolve, reject) => {
@@ -570,6 +570,20 @@ try {
     await page.evaluate(async () => { window.bugTest.finishLocal(); await new Promise(resolve => setTimeout(resolve, 100)); });
     assert.equal(await page.getByRole("button", { name: "停止共享", exact: true }).count(), 2);
     assert.equal(await page.getByRole("button", { name: "共享所选设备", exact: true }).isDisabled(), true, "Shared rows are no longer eligible for resubmission");
+  });
+
+  await check("source model names across brands and generic fallback replace old port names", {}, async page => {
+    await page.getByRole("button", { name: "连接", exact: true }).click();
+    await page.getByRole("checkbox", { name: "选择 Redmi K40", exact: true }).waitFor();
+    for (const name of ["Pixel 9 Pro", "CPH2581", "SM-S918B", "Android", "Android 调试设备"]) {
+      await page.evaluate(name => {
+        window.bugTest.remoteDevices = [{ ...window.bugTest.devices[0], name }];
+      }, name);
+      await page.getByRole("button", { name: "刷新", exact: true }).click();
+      await page.getByRole("checkbox", { name: "选择 " + name, exact: true }).waitFor();
+      assert.equal(await page.getByRole("checkbox", { name: "选择 Redmi K40", exact: true }).count(), 0);
+    }
+    assert.equal(await page.evaluate(() => window.bugTest.calls.attach_devices || 0), 0);
   });
 
   await check("driver safety change marks retained mounts unconfirmed", {}, async page => {
