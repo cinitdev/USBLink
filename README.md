@@ -2,40 +2,48 @@
 
 USBLink 是一个中文 Windows 桌面工具，为免费的 USB/IP 组件提供图形界面。它内置 EasyTier 加密组网，可以共享和连接任意数量的 USB 设备，不需要账号或命令行。
 
-本次正式发布版本：**Windows 0.3.11 + Android 模块 0.3.3**。下载入口：[v0.3.11 发布页](https://github.com/cinitdev/USBLink/releases/tag/v0.3.11)。完整变更见 [发布说明](RELEASE_NOTES.md) 和 [更新日志](CHANGELOG.md)。
+当前正式发布：**Windows 0.3.12 + Android 模块 0.3.12**。下载：[v0.3.12 发布页](https://github.com/cinitdev/USBLink/releases/tag/v0.3.12)。完整变更见 [发布说明](RELEASE_NOTES.md) 和 [更新日志](CHANGELOG.md)。
 
-## Android 手机模块（USB ADB 实验版）
+Windows 连接页新增可搜索的同网设备列表，可保留多个手机／电脑来源的 USB 连接；切换查看无需退出网络或重新输入配对码，不设置成员或共享数量上限。所有成员使用同一个配对码，原先分别组网的设备只需调整一次。验证范围见 [多设备连接验证](docs/multi-network-0.3.12-validation.md)。
 
-新增独立的 [USBLink Mobile](mobile/README.md)，作者为 **一只小柒夏**，要求 **Android 12 及以上（API 31+）、ARM64、Root 和 APatch / KernelSU**。模块使用 DEX JAR + `app_process` 和蓝白／藏蓝手机 WebUI，没有独立 APK；低于 Android 12 会拒绝安装。
+## Android 手机模块（USB ADB 实验功能）
 
-手机与电脑加入同一个 USBLink 网络，在手机开启“共享这台手机”，再在 Windows 0.3.11 的“连接”页选择手机、点击“连接设备”。首次连接需在手机确认 RSA 调试授权；复用电脑现有的 ADB / Android Studio，无需 `adb connect`，USBLink 不启动另一套桌面 ADB。
+[USBLink Mobile](mobile/README.md) 作者为 **一只小柒夏**，要求 **Android 12+（API 31+）、ARM64、Root**。同一个 ZIP 支持 Magisk、APatch 和 KernelSU；Magisk 20.4+ 用户自行安装并授权 [KsuWebUI](https://github.com/KOWX712/KsuWebUIStandalone)，其他两种管理器可直接打开 WebUI。模块为 DEX JAR + app_process，没有独立 USBLink APK。
 
-该模块通过用户态 USB 模拟提供 **Android ADB Interface**，尚不支持 MTP 便携设备／资源管理器浏览手机存储、Fastboot、U 盘或外接手机共享。实测目标是 Redmi K40／Android 12／APatch；其他品牌、ROM 和天玑机型尚未完成真机验证，不能仅凭 ARM64 就保证兼容。
+0.3.12 汇总损坏运行记录的启动恢复、网络查询／路由误断开、端口复用和双向传输修复；新增远程 ADB 请求历史、受 ROM 支持限制的 ADB Root 开关及三管理器支持。关闭共享会断开网络，保留配对码；再次开启连接原网络，重启遵循保存的开关。减少了关闭状态的后台活动，但没有实际电量测量。
 
-手机共享开关会保存，重启后等待系统与防护规则就绪再恢复共享，等待期间可以关闭；日常启停无需重启手机。启停会重启系统 adbd，现有调试可能短暂中断。状态自动同步，共享时每 2 秒、关闭时每 5 秒，返回 WebUI 立即同步。电脑掉线后仍需手动连接，不会自动重挂载。
+手机与电脑加入同一个 USBLink 网络，在手机开启普通 USB 调试与“共享这台手机”，再从电脑连接页选择手机、点击连接设备。首次需在手机确认 RSA 授权；使用电脑已有 ADB / Android Studio，无需无线调试或 `adb connect`，USBLink 不启动另一套桌面 ADB。
+
+启停共享及切换 ADB Root 可能重启系统 adbd、中断现有调试；日常操作无需重启手机。Root 偏好默认开启，实际权限单独核验，手机已 Root 不代表其 ROM 支持 adbd Root。电脑断线后须手动连接，不自动重挂载。WebUI 保留蓝白／藏蓝三页布局、手机型号和静默刷新。
+
+模块数据位于 `/data/adb/usblink/`。K40 / Android 12 上已热修复启动脚本并确认恢复后台，保留配对与历史；完整 0.3.12 ZIP 尚未刷入验收。K70 / Android 15 网络修复、Magisk／KernelSU、Root 切换及多手机长期传输仍待真机验证，见 [发布验证](docs/release-v0.3.12-validation.md)。
+
+手机仅提供 **Android ADB Interface**，不支持 MTP 便携设备、资源管理器浏览手机存储、Fastboot、U 盘或外接手机共享。其他品牌、ROM、天玑机型尚未全面实测；GitHub 正式发布渠道不代表手机实验功能已取得产品级 USB 认证。
 
 ## Windows 安装程序
 
-本次配套安装文件为 `USBLink-0.3.11-x64-Setup.exe` 和 `USBLink-Mobile-0.3.3-usb-adb-experimental-arm64.zip`。已有 Windows 0.3.11 的用户只需更新模块；更旧电脑版需要更新才能识别实验 USB 手机。旧 Mobile 0.2.2 的 TCP 共享状态仍兼容显示，但它与本次点击连接的 USB 实验通道不同。
+本次配套安装文件为 `USBLink-0.3.12-x64-Setup.exe` 和 `USBLink-Mobile-0.3.12-usb-adb-experimental-arm64.zip`。Windows 0.3.11 仍可连接模块；新版多设备列表需更新电脑程序。旧 TCP 开发模块与本次 USB 实验通道不同，本次不分发 TCP ZIP。
 
-从 [本次发布页](https://github.com/cinitdev/USBLink/releases/tag/v0.3.11) 下载 Windows x64 的 `Setup.exe` 安装包。双击打开中文安装向导，选择安装目录后完成安装；可创建开始菜单和桌面快捷方式，也可以从 Windows“设置 → 应用”中卸载。默认安装到当前用户目录。发布页附有 SHA-256 校验文件。
+从 [本次发布页](https://github.com/cinitdev/USBLink/releases/tag/v0.3.12) 下载 Windows x64 的 `Setup.exe` 安装包。双击打开中文安装向导，选择安装目录后完成安装；可创建开始菜单和桌面快捷方式，也可以从 Windows“设置 → 应用”中卸载。默认安装到当前用户目录。发布页附有 SHA-256 校验文件。
 
 安装包会检查 WebView2，缺失时联网下载并安装。USB 驱动仍通过应用“设置”页安装；EasyTier 和许可证已包含在程序及安装资源中。已开启的开机启动项会指向新的安装路径。
 
 升级默认选择“直接更新（推荐，保留配置，无需卸载）”，沿用原安装目录并保留配对信息、设置及快捷方式；也可自行选择先卸载再安装。同版本支持保留配置重新安装。0.2.20 起，如果 USBLink 仍在运行，提示“结束进程并继续？”；点击“确定”后安装器会结束当前用户的 USBLink 进程，并确认进程与会话锁都释放后继续，无需手动关闭。点击“取消”退出本次操作；结束失败可重试。强制结束会跳过 USB 共享和挂载清理，遗留状态在下次启动 USBLink 时清理。静默/被动安装不擅自结束进程，遇到占用返回 1618。旧安装包的提示需关闭后改用新版安装包。
 
-卸载应用会保留配对配置、独立的 EasyTier 网络服务和 USB 驱动；如果需要离开加密网络，请先在应用中点击“离开连接”。
+卸载应用会保留配对配置、独立的 EasyTier 网络服务和 USB 驱动；如果需要离开加密网络，请先在应用中点击“退出网络”。
 
 ## 运行方式
 
-在两台电脑上分别安装 USBLink：
+让需要互联的手机和电脑加入同一个 USBLink 网络，软件不设置成员数量或共享设备数量上限：
 
-- 一台电脑在“连接”页创建配对码，另一台电脑输入配对码加入。
+- 任选一台电脑创建网络，其余电脑和手机模块都用这个网络的配对码加入；不要为每台手机分别创建网络。已经使用不同网络时，只需在其他设备退出旧网络、加入共同网络一次，电脑保留当前网络。
+- 手机开启“共享这台手机”后上线；关闭共享仍会断网省电、保留配对信息。电脑需保持 USBLink 打开。
 - USB 所在电脑在“设备”页选择需要共享的设备。
 - “设备”页仅列出本机接入的 USB；接收到的远程虚拟 USB 在“连接”页查看和断开，不能再次共享。来源通过 Windows 父控制器识别，不按型号或设备编号去重。
 - 设备页支持“全部 / 手机 / 其他设备”分类及数量；全选、共享只处理当前分类，切换分类清空勾选。分类使用 USB 名称和系统描述，无法识别的设备归入“其他设备”，仍可在“全部”中查找。
 - 共享仅在本次运行期间有效；正常关闭 USBLink 会先停止共享并断开本机接收的 USB，重新打开后需要手动选择并共享。
-- 被控电脑在“连接”页选择远程电脑和需要连接的设备。
+- 接收电脑在“连接 → 同一网络的设备”查看或搜索来源手机／电脑，再连接它的 USB。可以保留多个来源的挂载，同时连接更多设备；切换查看来源不会断开其他挂载或退出网络。
+- “退出网络”会清除本机配对，日常切换设备无需使用它。设备数量仍受网络带宽、系统与虚拟 USB 驱动资源影响，不代表硬件容量无限。
 - 已连接设备右侧可单独“断开”，其余设备继续使用，也保留“断开全部 USB”。断开期间显示进度，确认驱动释放所选挂载后才移除；失败保留设备并提示，支持手动重试。即使对方离线，也可以断开本机接收挂载。
 - “设置”页会显示内置 EasyTier，并检测 usbipd-win 和 usbip-win2。
 - 安装组件后返回 USBLink，状态会立即重新检测；设置页打开期间也会自动刷新。
@@ -99,7 +107,7 @@ cargo test --manifest-path src-tauri\Cargo.toml
 npm run tauri:build
 ```
 
-默认构建会生成 NSIS 安装包：`src-tauri\target\release\bundle\nsis\USBLink_0.3.11_x64-setup.exe`。安装器配置位于 `src-tauri/tauri.conf.json`，升级/卸载检查位于 `src-tauri/installer-hooks.nsh`，自定义模板来源及验证步骤见 [安装器维护说明](src-tauri/INSTALLER.md)。
+默认构建会生成 NSIS 安装包：`src-tauri\target\release\bundle\nsis\USBLink_0.3.12_x64-setup.exe`。安装器配置位于 `src-tauri/tauri.conf.json`，升级/卸载检查位于 `src-tauri/installer-hooks.nsh`，自定义模板来源及验证步骤见 [安装器维护说明](src-tauri/INSTALLER.md)。
 
 在没有运行中的 USBLink、没有现有安装和同名快捷方式的测试账户中，可以运行 `tests/installer-smoke.ps1` 验证静默安装、覆盖安装、文件校验、快捷方式、卸载注册及卸载后保留用户文件；脚本不启动应用，并恢复测试前的开机启动项。
 
