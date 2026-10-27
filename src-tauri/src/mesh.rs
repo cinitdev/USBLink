@@ -871,6 +871,21 @@ mod tests {
     }
 
     #[test]
+    fn peer_discovery_preserves_large_networks_without_a_member_cap() {
+        let values: Vec<Value> = (2..82)
+            .map(|index| serde_json::json!({
+                "ipv4": format!("10.0.0.{index}"),
+                "hostname": format!("Device-{index}"),
+                "cost": "p2p", "lat_ms": "3", "tunnel_proto": "udp"
+            }))
+            .collect();
+        let (_, peers, _) = parse_peers(&values);
+        assert_eq!(peers.len(), 80);
+        assert_eq!(peers.last().unwrap().ip, "10.0.0.81");
+        assert!(peers.iter().all(|peer| !peer.online && !peer.usb_ready));
+    }
+
+    #[test]
     fn legacy_relay_variants_are_repaired() {
         for relay in [
             "tcp://public.easytier.top:11010/",

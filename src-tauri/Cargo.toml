@@ -1,6 +1,6 @@
 [package]
 name = "usblink"
-version = "0.3.11"
+version = "0.3.12"
 description = "A friendly Windows USB/IP control surface"
 authors = ["CinitDev"]
 edition = "2021"

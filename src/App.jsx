@@ -13,20 +13,23 @@ import { applyAttachedState, sameDevice } from "./usb-state.mjs";
 import { isPhoneDevice } from "./device-categories.mjs";
 import { canUsePeer, mergePeerPresence, mountPresence, peerStatusLabel, adbConnectCommand } from "./peer-state.mjs";
 import { readStored, readBoolean, writeStored, removeStored, normalizeRelay } from "./preferences.mjs";
+import { NetworkDevices } from "./NetworkDevices.jsx";
+import { sourceDeviceRows, sourceDeviceKey, selectedSourceBusIds, previewNetworkPeers } from "./network-devices.mjs";
 
 const nativeApp = typeof window !== "undefined" && "__TAURI_INTERNALS__" in window;
 const previewUnpaired = !nativeApp && new URLSearchParams(window.location.search).has("unpaired");
 const previewLegacy = !nativeApp && new URLSearchParams(window.location.search).has("legacy");
 const previewAndroid = !nativeApp && new URLSearchParams(window.location.search).get("android");
+const previewMulti = !nativeApp && new URLSearchParams(window.location.search).has("multi");
 const defaultRelay = "tcp://183.230.36.171:11010";
 const legacyRelay = "tcp://public.easytier.top:11010";
 const demoPairingCode = "USBLINK1-eyJ2ZXJzaW9uIjoxLCJuZXR3b3JrX25hbWUiOiJ1c2JsaW5rLWRlbW8iLCJuZXR3b3JrX3NlY3JldCI6ImRlbW8iLCJyZWxheSI6InRjcDovL3B1YmxpYy5lYXN5dGllci50b3A6MTEwMTAifQ";
-const demoPeers = previewAndroid ? [{ name: "USBLink-Android", ip: "10.126.126.2", online: previewAndroid !== 'offline', usbReady: previewAndroid === 'usb', usbKind: previewAndroid.startsWith('usb') ? 'android-adb-experimental' : 'usbip', os: 'android', adbReady: previewAndroid === 'ready', adbState: previewAndroid, latency: '3.5', tunnel: 'udp' }] : [{ name: "OFFICE-PC", ip: "10.126.126.2", online: true, os: "windows", latency: "3.5", tunnel: "udp" }];
+const demoPeers = previewMulti ? previewNetworkPeers(12) : previewAndroid ? [{ name: "USBLink-Android", ip: "10.126.126.2", online: previewAndroid !== 'offline', usbReady: previewAndroid === 'usb', usbKind: previewAndroid.startsWith('usb') ? 'android-adb-experimental' : 'usbip', os: 'android', adbReady: previewAndroid === 'ready', adbState: previewAndroid, latency: '3.5', tunnel: 'udp' }] : [{ name: "OFFICE-PC", ip: "10.126.126.2", online: true, os: "windows", latency: "3.5", tunnel: "udp" }];
 const demoMesh = previewUnpaired
   ? { configured: false, running: false, localIp: null, networkName: null, relay: defaultRelay, peerCount: 0, peers: [], pairingCode: null, problem: null, needsRepair: false }
   : previewLegacy
   ? { configured: true, running: false, localIp: null, networkName: "usblink-legacy000001", relay: legacyRelay, peerCount: 0, peers: [], pairingCode: null, problem: "默认公共节点已经失效，请修复连接", needsRepair: true }
-  : { configured: true, running: true, localIp: "10.126.126.1", networkName: "usblink-7f2a94c1830b", relay: defaultRelay, peerCount: 1, peers: demoPeers, pairingCode: null, problem: null, needsRepair: false };
+  : { configured: true, running: true, localIp: "10.126.126.1", networkName: "usblink-7f2a94c1830b", relay: defaultRelay, peerCount: demoPeers.filter(peer => peer.online).length, peers: demoPeers, pairingCode: null, problem: null, needsRepair: false };
 const demoEnvironment = {
   computerName: "DESKTOP-7G3K2LQ", meshIp: demoMesh.localIp,
   usbipdInstalled: true, usbipInstalled: true, easytierEmbedded: true,
@@ -154,6 +157,7 @@ export default function App() {
   const [selected, setSelected] = useState(new Set());
   const [deviceCategory, setDeviceCategory] = useState("all");
   const [remoteDevices, setRemoteDevices] = useState([]);
+  const [remoteHost, setRemoteHost] = useState("");
   const [remoteProblem, setRemoteProblem] = useState("");
   const [remoteLoading, setRemoteLoading] = useState(false);
   const [remoteSelected, setRemoteSelected] = useState(new Set());
@@ -187,8 +191,19 @@ export default function App() {
   }, [resolveAttachedNames]);
   const attached = useAttachedDevices(readAttached, environment.usbipInstalled && environment.usbipSafe && sharingSession.ready, prefs.autoRefresh);
 
-  const selectedPeer = useMemo(() => peers.find((peer) => peer.ip === selectedPeerIp) || peers[0], [peers, selectedPeerIp]);
-  const remoteRows = useMemo(() => canUsePeer(selectedPeer) ? applyAttachedState(selectedPeerIp, remoteDevices, attached.devices) : [], [selectedPeerIp, selectedPeer, remoteDevices, attached.devices]);
+  const selectedPeer = useMemo(() => peers.find((peer) => peer.ip === selectedPeerIp), [peers, selectedPeerIp]);
+  const remoteRows = useMemo(() => canUsePeer(selectedPeer) ? sourceDeviceRows(selectedPeerIp, { host: remoteHost, devices: remoteDevices }, attached.devices) : [], [selectedPeerIp, selectedPeer, remoteHost, remoteDevices, attached.devices]);
+  const remoteSelectedBusIds = useMemo(() => selectedSourceBusIds(selectedPeerIp, remoteRows, remoteSelected), [selectedPeerIp, remoteRows, remoteSelected]);
+  const selectRemoteBusIds = (busIds) => setRemoteSelected(new Set(remoteRows
+    .filter(device => !device.attached && busIds.has(device.busId))
+    .map(device => sourceDeviceKey(selectedPeerIp, device))));
+  const selectPeer = useCallback((host) => {
+    if (operation.current || host === currentPeerIp.current || !peersSnapshot.current.some(peer => peer.ip === host)) return;
+    currentPeerIp.current = host;
+    remoteRequest.current += 1; remotePending.current = null;
+    setRemoteHost(""); setRemoteDevices([]); setRemoteSelected(new Set()); setRemoteProblem(""); setRemoteLoading(false);
+    setSelectedPeerIp(host); setPeerMenu(false);
+  }, []);
   const notify = useCallback((message, type = "success") => {
     window.clearTimeout(toastTimer.current);
     setToast({ message, type });
@@ -211,6 +226,7 @@ export default function App() {
     else if (next.pairingCode) setPairingCode(next.pairingCode);
     if (identity !== meshIdentity.current) {
       remoteRequest.current += 1;
+      remotePending.current = null; setRemoteHost("");
       setRemoteDevices([]); setRemoteSelected(new Set()); setRemoteProblem("");
     }
     if (!next.running || !canUsePeer(knownPeers.find(peer => peer.ip === selectedIp))) {
@@ -295,13 +311,15 @@ export default function App() {
     remotePending.current = { host: selectedPeerIp, request };
     setRemoteLoading(true);
     try {
-      const fallback = previewAndroid === 'usb' ? [{busId:'99-1',vidPid:'18d1:4ee7',name:'Redmi K40 · USB ADB（实验）',detail:'手机 · USB ADB 实验通道',shared:true,friendlyName:true}] : demoDevices.map((item) => ({ ...item, shared: true }));
+      const peer = peersSnapshot.current.find(peer => peer.ip === selectedPeerIp);
+      const fallback = peer?.os === 'android' && peer?.usbKind === 'android-adb-experimental' ? [{busId:'99-1',vidPid:'18d1:4ee7',name:previewMulti ? peer.name : 'Redmi K40',detail:'手机 · USB ADB 实验通道',shared:true,friendlyName:true}] : demoDevices.map((item) => ({ ...item, shared: true }));
       const next = await backend("list_remote_devices", { host: selectedPeerIp }, fallback);
       if (request !== remoteRequest.current || selectedPeerIp !== currentPeerIp.current) return;
       const resolved = stabilizeRemoteNames(selectedPeerIp, next, remoteNameCache.current);
+      setRemoteHost(selectedPeerIp);
       setRemoteDevices(resolved);
       setRemoteProblem("");
-      setRemoteSelected((old) => new Set([...old].filter((id) => resolved.some((item) => item.busId === id))));
+      setRemoteSelected((old) => new Set([...old].filter(key => resolved.some(item => sourceDeviceKey(selectedPeerIp, item) === key))));
     } catch (error) {
       if (request !== remoteRequest.current || selectedPeerIp !== currentPeerIp.current) return;
       const message = String(error);
@@ -370,6 +388,7 @@ export default function App() {
   }, [page, refreshEnvironment, refreshMesh]);
   useEffect(() => {
     remoteRequest.current += 1;
+    remotePending.current = null; setRemoteHost("");
     setRemoteDevices([]); setRemoteSelected(new Set()); setRemoteProblem(""); setRemoteLoading(false);
     return () => { remoteRequest.current += 1; };
   }, [selectedPeerIp]);
@@ -377,8 +396,8 @@ export default function App() {
     if (!busy && page === "connections" && selectedPeerIp) refreshRemote();
   }, [busy, page, selectedPeerIp, refreshRemote]);
   useEffect(() => {
-    setRemoteSelected((old) => new Set([...old].filter((id) => remoteRows.some((item) => item.busId === id && !item.attached))));
-  }, [remoteRows]);
+    setRemoteSelected((old) => new Set([...old].filter(key => remoteRows.some(item => sourceDeviceKey(selectedPeerIp, item) === key && !item.attached))));
+  }, [selectedPeerIp, remoteRows]);
   useEffect(() => {
     if (!prefs.autoRefresh) return;
     const timer = window.setInterval(() => { if (document.hidden || operation.current) return; page === "devices" ? refreshLocal() : page === "connections" && selectedPeerIp && refreshRemote(); }, 5000);
@@ -424,6 +443,11 @@ export default function App() {
   }, [environment, installingComponents, notify]);
 
   const toggle = (id, remote = false) => {
+    if (remote) {
+      const device = remoteRows.find(item => item.busId === id && !item.attached);
+      if (!device) return;
+      id = sourceDeviceKey(selectedPeerIp, device);
+    }
     const setter = remote ? setRemoteSelected : setSelected;
     setter((old) => { const next = new Set(old); next.has(id) ? next.delete(id) : next.add(id); return next; });
   };
@@ -486,7 +510,7 @@ export default function App() {
     try {
       await backend("leave_mesh"); const empty = { configured: false, running: false, localIp: null, networkName: null, relay: defaultRelay, peerCount: 0, peers: [], problem: null, needsRepair: false };
       applyMesh(empty); setEnvironment((old) => ({ ...old, meshConfigured: false, meshRunning: false, meshIp: null, meshPeerCount: 0 }));
-      setPairingCode(""); setRemoteDevices([]); setRemoteProblem(""); notify("已离开连接");
+      setPairingCode(""); setRemoteDevices([]); setRemoteProblem(""); notify("已退出网络");
     } catch (error) { notify(String(error), "error"); }
     finally { endOperation(); }
   };
@@ -532,7 +556,8 @@ export default function App() {
     if (!beginOperation(busId)) return; try { await backend("unshare_device", { busId }); if (!nativeApp) setDevices((old) => old.map((item) => item.busId === busId ? { ...item, shared: false } : item)); notify("已停止共享"); }
     catch (error) { notify(String(error), "error"); } finally { await refreshLocal(true); endOperation(); }
   };
-  const attach = async (busIds = [...remoteSelected]) => {
+  const attach = async (busIds = [...remoteSelectedBusIds]) => {
+    if (selectedPeerIp !== currentPeerIp.current || remoteHost !== selectedPeerIp) return;
     if (!mesh.running || !meshServiceReady || !environment.usbipSafe || !canUsePeer(selectedPeer) || !busIds.length || usbOperation.current || !attached.ready || attached.problem) return;
     const host = selectedPeer.ip;
     const chosen = remoteRows.filter((item) => busIds.includes(item.busId) && !item.attached);
@@ -543,7 +568,8 @@ export default function App() {
     let confirmed = false;
     try {
       const result = await backend("attach_devices", { host, busIds: chosen.map((item) => item.busId), expectedVidPids: Object.fromEntries(chosen.map((item) => [item.busId, item.vidPid])) }, () => {
-        previewAttached.current = [...previewAttached.current, ...chosen.map((item, index) => ({ ...item, host, attached: true, port: previewAttached.current.length + index + 1 }))];
+        const nextPort = Math.max(0, ...previewAttached.current.map(item => item.port)) + 1;
+        previewAttached.current = [...previewAttached.current, ...chosen.map((item, index) => ({ ...item, host, attached: true, port: nextPort + index }))];
         return previewAttached.current;
       });
       if (!Array.isArray(result) || chosen.some((item) => !applyAttachedState(host, [item], result)[0]?.attached)) throw new Error("未收到所选设备的完整挂载结果，请刷新连接状态");
@@ -645,9 +671,10 @@ export default function App() {
       <div className="network-state"><StatusDot online={displayedMesh.running} /><div><strong>{displayedMesh.problem ? "连接异常" : displayedMesh.running ? "加密网络" : mesh.configured ? "正在连接" : "尚未配对"}</strong><span>{mesh.localIp || "无需注册账号"}</span></div></div>
     </aside>
     <main className="workspace">
+      {previewMulti && <p className="preview-notice" role="status">多设备交互预览 · 以下为示例数据，不会操作真实 USB。</p>}
       {!sharingSession.ready && <p className="usb-status-warning sharing-session-status" role="status"><ErrorCircle20Regular />{sharingSession.problem || (sharingSession.phase === "closing" ? "正在停止共享并断开 USB，完成后退出…" : "正在清理上次遗留的 USB 共享和挂载，请稍候…")}{sharingSession.phase === "failed" && <button className="text-action" disabled={!!busy} onClick={retrySharingCleanup}>重新清理 USB</button>}</p>}
-      {page === "devices" && <DevicePage activeBusIds={activeBusIds} category={deviceCategory} setCategory={setDeviceCategory} openingDownload={openingDownload} environment={environment} mesh={displayedMesh} localProblem={localProblem} sharingProblem={sharingProblem} devices={devices} selected={selected} selectedPeer={selectedPeer} peerMenu={peerMenu} setPeerMenu={setPeerMenu} peers={peers} setSelectedPeerIp={setSelectedPeerIp} toggle={toggle} setSelected={setSelected} busy={effectiveBusy} localLoading={localLoading} refresh={() => refreshLocal()} share={share} repairSharing={repairSharing} unshare={unshare} openDownload={openDownload} setPage={setPage} />}
-      {page === "connections" && <ConnectionPage activeBusIds={activeBusIds} joinProblem={joinProblem} hidePairingCode={() => setPairingCode("")} openingDownload={openingDownload} environment={environment} mesh={displayedMesh} createNetwork={createNetwork} joinNetwork={joinNetwork} joinCode={joinCode} setJoinCode={value => { setJoinCode(value); setJoinProblem(""); }} pairingCode={pairingCode} revealAndCopyCode={revealAndCopyCode} restartNetwork={restartNetwork} repairNetwork={repairNetwork} leaveNetwork={() => setConfirmLeave(true)} peers={peers} selectedPeer={selectedPeer} setSelectedPeerIp={setSelectedPeerIp} peerMenu={peerMenu} setPeerMenu={setPeerMenu} devices={remoteRows} attached={attached} remoteLoading={remoteLoading} remoteProblem={remoteProblem} selected={remoteSelected} setSelected={setRemoteSelected} toggle={(id) => toggle(id, true)} busy={effectiveBusy || (!meshReady ? "initializing" : "")} refresh={() => { refreshMesh(); refreshRemote(true); attached.refresh(); }} attach={attach} stopAll={stopAll} stopDevice={stopDevice} detachingDevice={detachingDevice} openDownload={openDownload} />}
+      {page === "devices" && <DevicePage activeBusIds={activeBusIds} category={deviceCategory} setCategory={setDeviceCategory} openingDownload={openingDownload} environment={environment} mesh={displayedMesh} localProblem={localProblem} sharingProblem={sharingProblem} devices={devices} selected={selected} selectedPeer={selectedPeer} peerMenu={peerMenu} setPeerMenu={setPeerMenu} peers={peers} setSelectedPeerIp={selectPeer} toggle={toggle} setSelected={setSelected} busy={effectiveBusy} localLoading={localLoading} refresh={() => refreshLocal()} share={share} repairSharing={repairSharing} unshare={unshare} openDownload={openDownload} setPage={setPage} />}
+      {page === "connections" && <ConnectionPage activeBusIds={activeBusIds} joinProblem={joinProblem} hidePairingCode={() => setPairingCode("")} openingDownload={openingDownload} environment={environment} mesh={displayedMesh} createNetwork={createNetwork} joinNetwork={joinNetwork} joinCode={joinCode} setJoinCode={value => { setJoinCode(value); setJoinProblem(""); }} pairingCode={pairingCode} revealAndCopyCode={revealAndCopyCode} restartNetwork={restartNetwork} repairNetwork={repairNetwork} leaveNetwork={() => setConfirmLeave(true)} peers={peers} selectedPeer={selectedPeer} setSelectedPeerIp={selectPeer} devices={remoteRows} attached={attached} remoteLoading={remoteLoading} remoteProblem={remoteProblem} selected={remoteSelectedBusIds} setSelected={selectRemoteBusIds} toggle={(id) => toggle(id, true)} busy={effectiveBusy || (!meshReady ? "initializing" : "")} refresh={() => { refreshMesh(); refreshRemote(true); attached.refresh(); }} attach={attach} stopAll={stopAll} stopDevice={stopDevice} detachingDevice={detachingDevice} openDownload={openDownload} />}
       {page === "settings" && <SettingsPage environment={environment} mesh={mesh} prefs={prefs} savingPreference={savingPreference} updatePreference={updatePreference} openDownload={openDownload} installingComponents={installingComponents} openingDownload={openingDownload} cancelWaiting={kind => setInstallingComponents(old => old.filter(item => item !== kind))} savedRelay={savedRelay} relayProblem={relayProblem} checkingComponents={checkingComponents} checkComponents={checkComponents} relayDraft={relayDraft} setRelayDraft={(value) => { relayDirty.current = value.trim() !== savedRelay; setRelayDraft(value); setRelayProblem(""); }} saveRelay={saveRelay} busy={effectiveBusy} />}
     </main>
     {confirmLeave && <LeaveDialog busy={effectiveBusy} onCancel={() => setConfirmLeave(false)} onConfirm={leaveNetwork} />}
@@ -696,8 +723,8 @@ function LeaveDialog({ busy, onCancel, onConfirm }) {
     return () => { dialog.current?.close(); previous?.focus(); };
   }, []);
   return <dialog ref={dialog} className="confirm-dialog" aria-labelledby="leave-title" aria-describedby="leave-description" onCancel={event => { event.preventDefault(); onCancel(); }}>
-    <h2 id="leave-title">离开当前连接？</h2><p id="leave-description">将删除本机保存的配对信息，再次加入需要对方的配对码。已有 USB 挂载仍可在连接页断开。</p>
-    <footer><button autoFocus className="secondary-button" onClick={onCancel}>取消</button><button className="primary-button small" disabled={!!busy} onClick={onConfirm}>确认离开</button></footer>
+    <h2 id="leave-title">退出当前网络？</h2><p id="leave-description">退出会删除本机保存的配对信息。切换手机或电脑只需选择网络设备，无需退出；已有 USB 挂载仍可在连接页单独断开。</p>
+    <footer><button autoFocus className="secondary-button" onClick={onCancel}>取消</button><button className="primary-button small" disabled={!!busy} onClick={onConfirm}>确认退出网络</button></footer>
   </dialog>;
 }
 
@@ -725,8 +752,8 @@ function DevicePage({ activeBusIds, category, setCategory, openingDownload, envi
     {mesh.problem && <p className="usb-status-warning" role="status"><ErrorCircle20Regular />{mesh.problem}<button className="text-action" onClick={() => setPage("connections")}>前往连接</button></p>}
     {localProblem && <p className="usb-status-warning" role="status"><ErrorCircle20Regular />本机设备状态待确认，请刷新后重试：{localProblem}</p>}
     {sharingProblem && <p className="usb-status-warning" role="status"><ErrorCircle20Regular />{sharingProblem}</p>}
-    <section className="connection-overview"><div className="machine"><span>本机</span><div><Desktop20Regular /><p><strong>{environment.computerName}</strong><small>{mesh.localIp || "尚未加入加密网络"}</small></p></div></div><div className={`connection-line ${selectedPeer?.online ? "connected" : ""}`}><i /><b><LockClosed16Filled /></b><i /></div><div className="machine remote"><span>远程电脑</span><PeerPicker compact disabled={!!busy} selectedPeer={selectedPeer} peers={peers} open={peerMenu} setOpen={setPeerMenu} select={setSelectedPeerIp} /></div></section>
-    {!mesh.configured ? <DependencyEmpty icon={ArrowRight20Regular} title="先连接另一台电脑" text="无需账号，在“连接”页面创建配对码或输入对方的配对码。" action="前往连接" onClick={() => setPage("connections")} /> : !environment.usbipdInstalled ? <DependencyEmpty title="USB 共享服务尚未安装" text="安装免费的 usbipd-win 后即可共享本机 USB 设备。" action={openingDownload === "usbipd" ? "正在打开…" : "打开安装页面"} disabled={!!openingDownload} onClick={() => openDownload("usbipd")} /> : <section className="device-categories">
+    <section className="connection-overview"><div className="machine"><span>本机</span><div><Desktop20Regular /><p><strong>{environment.computerName}</strong><small>{mesh.localIp || "尚未加入加密网络"}</small></p></div></div><div className={`connection-line ${selectedPeer?.online ? "connected" : ""}`}><i /><b><LockClosed16Filled /></b><i /></div><div className="machine remote"><span>网络设备</span><PeerPicker compact disabled={!!busy} selectedPeer={selectedPeer} peers={peers} open={peerMenu} setOpen={setPeerMenu} select={setSelectedPeerIp} /></div></section>
+    {!mesh.configured ? <DependencyEmpty icon={ArrowRight20Regular} title="先加入设备网络" text="无需账号，让手机和电脑使用同一个配对码加入网络。" action="前往连接" onClick={() => setPage("connections")} /> : !environment.usbipdInstalled ? <DependencyEmpty title="USB 共享服务尚未安装" text="安装免费的 usbipd-win 后即可共享本机 USB 设备。" action={openingDownload === "usbipd" ? "正在打开…" : "打开安装页面"} disabled={!!openingDownload} onClick={() => openDownload("usbipd")} /> : <section className="device-categories">
       <div className="device-tabs" role="tablist" aria-label="USB 设备分类">{categories.map(item => <button key={item.id} id={`device-tab-${item.id}`} type="button" role="tab" aria-selected={category === item.id} aria-controls="device-category-panel" tabIndex={category === item.id ? 0 : -1} disabled={!!busy} onClick={() => changeCategory(item.id)} onKeyDown={event => navigateCategory(event, categories.indexOf(item))}>{item.label}<span className="badge">{item.devices.length}</span></button>)}</div>
       <div className="device-category-panel" id="device-category-panel" role="tabpanel" aria-labelledby={`device-tab-${category}`}>
         <DeviceTable activeBusIds={activeBusIds} title="可共享的 USB 设备" devices={current.devices} selected={selected} all={all} onAll={() => setSelected(all ? new Set() : new Set(available.map(item => item.busId)))} toggle={toggle} busy={busy} loading={localLoading} share={share} unshare={unshare} unavailable={!!localProblem || !mesh.running} stopUnavailable={!!localProblem} connectionKnown={!localProblem} emptyTitle={category === "all" ? undefined : category === "phones" ? "暂未识别到手机" : "没有发现其他 USB 设备"} />
@@ -736,7 +763,7 @@ function DevicePage({ activeBusIds, category, setCategory, openingDownload, envi
   </>;
 }
 
-function ConnectionPage({ activeBusIds, joinProblem, hidePairingCode, openingDownload, environment, mesh, createNetwork, joinNetwork, joinCode, setJoinCode, pairingCode, revealAndCopyCode, restartNetwork, repairNetwork, leaveNetwork, peers, selectedPeer, setSelectedPeerIp, peerMenu, setPeerMenu, devices, attached, remoteLoading, remoteProblem, selected, setSelected, toggle, busy, refresh, attach, stopAll, stopDevice, detachingDevice, openDownload }) {
+function ConnectionPage({ activeBusIds, joinProblem, hidePairingCode, openingDownload, environment, mesh, createNetwork, joinNetwork, joinCode, setJoinCode, pairingCode, revealAndCopyCode, restartNetwork, repairNetwork, leaveNetwork, peers, selectedPeer, setSelectedPeerIp, devices, attached, remoteLoading, remoteProblem, selected, setSelected, toggle, busy, refresh, attach, stopAll, stopDevice, detachingDevice, openDownload }) {
   const available = devices.filter((device) => !device.attached);
   const all = available.length > 0 && available.every((device) => selected.has(device.busId));
   const onlineCount = peers.filter(peer => peer.online).length;
@@ -744,19 +771,21 @@ function ConnectionPage({ activeBusIds, joinProblem, hidePairingCode, openingDow
   const androidPeer = selectedPeer?.os === "android" && !usbPhone;
   const mountsUnavailable = attached.devices.some(device => mountPresence(device, peers, mesh.running) !== "已连接");
   const imported = <AttachedDevices snapshot={attached} stopAll={stopAll} stopDevice={stopDevice} detachingDevice={detachingDevice} busy={busy} peers={peers} networkReady={mesh.running} />;
-  if (!mesh.configured) return <><PageHeader title="连接" subtitle={mesh.problem || "无需注册账号，使用配对码连接两台电脑"} tone={mesh.problem ? "error" : "normal"} icon={NetworkCheck20Regular} onRefresh={refresh} disabled={!!busy} /><div className="connection-content unpaired-content">{imported}<PairingSetup joinProblem={joinProblem} createNetwork={createNetwork} joinNetwork={joinNetwork} joinCode={joinCode} setJoinCode={setJoinCode} busy={busy} /></div></>;
+  if (!mesh.configured) return <><PageHeader title="连接" subtitle={mesh.problem || "一个配对码，让手机和电脑加入同一网络"} tone={mesh.problem ? "error" : "normal"} icon={NetworkCheck20Regular} onRefresh={refresh} disabled={!!busy} /><div className="connection-content unpaired-content">{imported}<PairingSetup joinProblem={joinProblem} createNetwork={createNetwork} joinNetwork={joinNetwork} joinCode={joinCode} setJoinCode={setJoinCode} busy={busy} /></div></>;
   return <><PageHeader title="连接" subtitle={mesh.problem || (mesh.running ? "EasyTier 加密网络已启动" : "EasyTier 网络正在启动")} tone={mesh.problem ? "error" : "normal"} icon={mesh.problem ? ErrorCircle20Regular : NetworkCheck20Regular} onRefresh={refresh} spinning={remoteLoading} disabled={!!busy} />
     <div className="connection-content">
-    <section className={`mesh-summary ${mesh.problem ? "problem" : ""}`}><div><span className="mesh-icon">{mesh.problem ? <ErrorCircle20Regular /> : <NetworkCheck20Regular />}</span><p><strong>{mesh.problem ? "连接失败" : mesh.running ? onlineCount ? "对方 USBLink 在线" : "暂无在线 USBLink" : "等待网络服务"}</strong><small>{mesh.problem || (mesh.running && !onlineCount ? "配对信息已保存，等待对方打开 USBLink" : mesh.localIp) || "正在分配虚拟地址"}</small></p></div><div className="mesh-meta"><span>应用响应已验证</span><strong>{onlineCount} 台设备</strong></div><div className="mesh-actions">{mesh.needsRepair && <button className="primary-button compact" onClick={repairNetwork} disabled={!!busy}><ArrowClockwise20Regular />{busy === "mesh-repair" ? "正在修复…" : "修复连接"}</button>}<button className="secondary-button" onClick={revealAndCopyCode} disabled={!!busy}><Copy20Regular />{busy === "mesh-code" ? "正在复制…" : "复制配对码"}</button><button className="icon-button" title="重新启动网络" aria-label="重新启动网络" onClick={restartNetwork} disabled={!!busy}>{busy === "mesh-restart" ? <ArrowClockwise20Regular className="spin" /> : <Power20Regular />}</button><button className="danger-action" onClick={leaveNetwork} disabled={!!busy}>离开连接</button></div></section>
+    <section className={`mesh-summary ${mesh.problem ? "problem" : ""}`}><div><span className="mesh-icon">{mesh.problem ? <ErrorCircle20Regular /> : <NetworkCheck20Regular />}</span><p><strong>{mesh.problem ? "连接失败" : mesh.running ? onlineCount ? "设备网络已就绪" : "暂无在线 USBLink" : "等待网络服务"}</strong><small>{mesh.problem || (mesh.running && !onlineCount ? "配对信息已保存，等待对方打开 USBLink" : mesh.localIp) || "正在分配虚拟地址"}</small></p></div><div className="mesh-meta"><span>应用响应已验证</span><strong>{onlineCount} 台设备</strong></div><div className="mesh-actions">{mesh.needsRepair && <button className="primary-button compact" onClick={repairNetwork} disabled={!!busy}><ArrowClockwise20Regular />{busy === "mesh-repair" ? "正在修复…" : "修复连接"}</button>}<button className="secondary-button" onClick={revealAndCopyCode} disabled={!!busy}><Copy20Regular />{busy === "mesh-code" ? "正在复制…" : "复制配对码"}</button><button className="icon-button" title="重新启动网络" aria-label="重新启动网络" onClick={restartNetwork} disabled={!!busy}>{busy === "mesh-restart" ? <ArrowClockwise20Regular className="spin" /> : <Power20Regular />}</button><button className="danger-action" onClick={leaveNetwork} disabled={!!busy}>退出网络</button></div></section>
     {pairingCode && <div className="pairing-code-band"><Key20Regular /><input aria-label="当前配对码" readOnly value={pairingCode} /><button className="text-action" disabled={!!busy} onClick={revealAndCopyCode}><Copy20Regular />复制</button><button className="text-action" disabled={!!busy} onClick={hidePairingCode}>隐藏配对码</button></div>}
+    <details className="network-invite"><summary><Add20Regular />添加手机或电脑到此网络</summary><div><p>把本网络配对码填入各台设备的“加入网络”，所有设备使用同一个码。USBLink 不限制成员或共享设备数量。</p><ol><li>保留电脑当前网络，复制上方配对码。</li><li>在手机模块 WebUI 或另一台电脑加入这个网络；已经加入其他网络的设备需要先退出旧网络，仅首次调整一次。</li><li>手机开启“共享这台手机”，电脑开启所需 USB 共享。随后直接在下方列表选择来源并连接。</li></ol><p>关闭手机共享会断网省电，配对信息仍保留；重新开启后等待上线，再手动连接 USB。</p><button className="secondary-button" disabled={!!busy} onClick={revealAndCopyCode}><Copy20Regular />复制本网络配对码</button></div></details>
     {imported}
-    <section className="remote-source"><span>设备来源</span><PeerPicker disabled={!!busy} selectedPeer={selectedPeer} peers={peers} open={peerMenu} setOpen={setPeerMenu} select={setSelectedPeerIp} /></section>
+    <NetworkDevices key={mesh.networkName} peers={peers} selectedIp={selectedPeer?.ip} select={setSelectedPeerIp} mounts={attached.devices} mountsKnown={attached.ready && !attached.problem} disabled={!!busy} />
+    <section className="remote-source"><span>当前来源</span><strong>{selectedPeer?.name || "等待设备加入"}</strong><small>{selectedPeer?.ip}</small></section>
     {selectedPeer && !androidPeer && !canUsePeer(selectedPeer) && <p className="usb-status-warning" role="status"><ErrorCircle20Regular />{selectedPeer.problem || (selectedPeer.online ? "USBLink 在线，但 USB 共享服务不可达" : "对方 USBLink 未运行或不可达，请双方更新并打开程序")}</p>}
     {usbPhone && <p className="usb-status-warning" role="status"><Phone20Regular />USB ADB 实验通道 · 连接后由电脑现有 ADB 识别，首次需在手机授权。暂不支持 MTP 便携设备。</p>}
     {!androidPeer && remoteProblem && <p className="usb-status-warning" role="status"><ErrorCircle20Regular />远程设备列表暂时无法更新：{remoteProblem}</p>}
-    {androidPeer ? <AndroidPeerPanel peer={selectedPeer} networkReady={mesh.running} /> : !environment.usbipInstalled ? <DependencyEmpty title="远程 USB 驱动尚未安装" text="安装免费的 usbip-win2 后即可连接远程 USB。" action={openingDownload === "usbip" ? "正在打开…" : "打开安装页面"} disabled={!!openingDownload} onClick={() => openDownload("usbip")} /> : !environment.usbipSafe ? <DependencyEmpty icon={ErrorCircle20Regular} title="远程 USB 驱动必须更新" text={environment.usbipProblem || "当前驱动存在系统崩溃风险，USBLink 已阻止连接。"} action={openingDownload === "usbip" ? "正在打开…" : "更新到 0.9.8.0"} disabled={!!openingDownload} onClick={() => openDownload("usbip")} /> : !selectedPeer ? <DependencyEmpty icon={Copy20Regular} title="等待另一台电脑加入" text="复制配对码发给对方，对方加入后会自动出现在这里。" action={busy === "mesh-code" ? "正在复制…" : "复制配对码"} disabled={!!busy} onClick={revealAndCopyCode} /> : <DeviceTable activeBusIds={activeBusIds} title="远程可用设备" remote devices={devices} selected={selected} all={all} onAll={() => setSelected(all ? new Set() : new Set(available.map((item) => item.busId)))} toggle={toggle} busy={busy} loading={remoteLoading} attach={attach} stopDevice={stopDevice} mounts={attached.devices} host={selectedPeer?.ip} detachingDevice={detachingDevice} unavailable={!mesh.running || !canUsePeer(selectedPeer) || !!remoteProblem || !attached.ready || !!attached.problem} connectionKnown={attached.ready && !attached.problem && mesh.running && canUsePeer(selectedPeer)} peerProblem={!selectedPeer.online ? "对方 USBLink 未运行或不可达" : selectedPeer.usbReady === false ? "共享服务不可达" : ""} />}
+    {androidPeer ? <AndroidPeerPanel peer={selectedPeer} networkReady={mesh.running} /> : !environment.usbipInstalled ? <DependencyEmpty title="远程 USB 驱动尚未安装" text="安装免费的 usbip-win2 后即可连接远程 USB。" action={openingDownload === "usbip" ? "正在打开…" : "打开安装页面"} disabled={!!openingDownload} onClick={() => openDownload("usbip")} /> : !environment.usbipSafe ? <DependencyEmpty icon={ErrorCircle20Regular} title="远程 USB 驱动必须更新" text={environment.usbipProblem || "当前驱动存在系统崩溃风险，USBLink 已阻止连接。"} action={openingDownload === "usbip" ? "正在打开…" : "更新到 0.9.8.0"} disabled={!!openingDownload} onClick={() => openDownload("usbip")} /> : !selectedPeer ? <DependencyEmpty icon={Copy20Regular} title="等待手机或电脑加入" text="将本网络配对码填入各台手机或电脑；手机开启共享后会自动出现在列表。" action={busy === "mesh-code" ? "正在复制…" : "复制配对码"} disabled={!!busy} onClick={revealAndCopyCode} /> : <DeviceTable activeBusIds={activeBusIds} title={selectedPeer ? `${selectedPeer.name} 的 USB` : "远程可用设备"} remote devices={devices} selected={selected} all={all} onAll={() => setSelected(all ? new Set() : new Set(available.map((item) => item.busId)))} toggle={toggle} busy={busy} loading={remoteLoading} attach={attach} stopDevice={stopDevice} mounts={attached.devices} host={selectedPeer?.ip} detachingDevice={detachingDevice} unavailable={!mesh.running || !canUsePeer(selectedPeer) || !!remoteProblem || !attached.ready || !!attached.problem} connectionKnown={attached.ready && !attached.problem && mesh.running && canUsePeer(selectedPeer)} peerProblem={!selectedPeer.online ? "对方 USBLink 未运行或不可达" : selectedPeer.usbReady === false ? "共享服务不可达" : ""} />}
     </div>
-    {!androidPeer && <footer className="command-bar"><button className="text-action" onClick={stopAll} disabled={!!busy || (!attached.devices.length && !attached.problem)}>{busy === "detach" && !detachingDevice ? "正在断开全部…" : "断开全部 USB"}</button><div><strong>{busy === "attach" ? `正在连接 ${activeBusIds.length} 个设备` : selected.size ? `已选择 ${selected.size} 个设备` : attached.devices.length ? (attached.problem || mountsUnavailable ? "USB 连接状态待确认" : `已连接 ${attached.devices.length} 个远程 USB`) : "选择需要连接的设备"}</strong><span>{!environment.usbipSafe ? "请先安装或更新远程 USB 驱动" : !mesh.running ? "等待加密网络就绪" : selectedPeer && !canUsePeer(selectedPeer) ? "等待对方 USBLink 和共享服务就绪" : remoteProblem || attached.problem ? "请刷新并确认设备状态" : selectedPeer ? `来自 ${selectedPeer.name}` : "等待另一台电脑"}</span></div>{selected.size > 0 && <button className="text-action" disabled={!!busy} onClick={() => setSelected(new Set())}>清除选择</button>}<button className="primary-button" disabled={!mesh.running || !canUsePeer(selectedPeer) || !environment.usbipSafe || !attached.ready || !!attached.problem || !!remoteProblem || !selected.size || !selectedPeer || !!busy} onClick={() => attach()}><PlugConnected20Regular />{busy === "attach" ? "正在连接…" : "连接所选设备"}</button></footer>}
+    {!androidPeer && <footer className="command-bar"><button className="text-action" onClick={stopAll} disabled={!!busy || (!attached.devices.length && !attached.problem)}>{busy === "detach" && !detachingDevice ? "正在断开全部…" : "断开全部 USB"}</button><div><strong>{busy === "attach" ? `正在连接 ${activeBusIds.length} 个设备` : selected.size ? `已选择 ${selected.size} 个设备` : attached.devices.length ? (attached.problem || mountsUnavailable ? "USB 连接状态待确认" : `已连接 ${attached.devices.length} 个远程 USB`) : "选择需要连接的设备"}</strong><span>{!environment.usbipSafe ? "请先安装或更新远程 USB 驱动" : !mesh.running ? "等待加密网络就绪" : selectedPeer && !canUsePeer(selectedPeer) ? "等待对方 USBLink 和共享服务就绪" : remoteProblem || attached.problem ? "请刷新并确认设备状态" : selectedPeer ? `当前查看：${selectedPeer.name}` : "等待设备加入网络"}</span></div>{selected.size > 0 && <button className="text-action" disabled={!!busy} onClick={() => setSelected(new Set())}>清除选择</button>}<button className="primary-button" disabled={!mesh.running || !canUsePeer(selectedPeer) || !environment.usbipSafe || !attached.ready || !!attached.problem || !!remoteProblem || !selected.size || !selectedPeer || !!busy} onClick={() => attach()}><PlugConnected20Regular />{busy === "attach" ? "正在连接…" : "连接所选设备"}</button></footer>}
   </>;
 }
 
@@ -775,7 +804,7 @@ function AndroidPeerPanel({ peer, networkReady }) {
 }
 
 function PairingSetup({ createNetwork, joinNetwork, joinCode, setJoinCode, joinProblem, busy }) {
-  return <section className="pairing-setup"><div><span className="pairing-icon"><Add20Regular /></span><h2>创建新连接</h2><p>生成一个加密配对码，发给另一台电脑即可。</p><button className="primary-button small" onClick={createNetwork} disabled={!!busy}>{busy === "mesh-create" ? "正在创建…" : "创建连接"}<ArrowRight20Regular /></button></div><i /><div><span className="pairing-icon"><Key20Regular /></span><h2>加入已有连接</h2><p>粘贴另一台电脑生成的 USBLink 配对码。</p>
+  return <section className="pairing-setup"><div><span className="pairing-icon"><Add20Regular /></span><h2>创建设备网络</h2><p>生成一个配对码，让你的手机和电脑都加入这个网络。无需为每台设备分别创建。</p><button className="primary-button small" onClick={createNetwork} disabled={!!busy}>{busy === "mesh-create" ? "正在创建…" : "创建网络"}<ArrowRight20Regular /></button></div><i /><div><span className="pairing-icon"><Key20Regular /></span><h2>加入已有网络</h2><p>粘贴任一成员提供的配对码，一次加入即可发现同网设备。</p>
     <form className="join-form" onSubmit={event => { event.preventDefault(); joinNetwork(); }}><div className="join-field"><input aria-label="配对码" aria-invalid={!!joinProblem} aria-describedby={joinProblem ? "join-problem" : "join-hint"} placeholder="粘贴配对码" autoComplete="off" spellCheck={false} disabled={!!busy} value={joinCode} onChange={event => setJoinCode(event.target.value)} /><button type="submit" aria-label="加入连接" title="加入连接" disabled={!joinCode.trim() || !!busy}>{busy === "mesh-join" ? <ArrowClockwise20Regular className="spin" /> : <ArrowRight20Regular />}</button></div>
     {joinProblem ? <p id="join-problem" className="field-error" role="alert">{joinProblem}</p> : <small id="join-hint" className="field-hint">{busy === "mesh-join" ? "正在验证配对码并加入…" : "粘贴后按 Enter 即可加入"}</small>}</form>
     </div></section>;
@@ -801,7 +830,7 @@ function DeviceTable({ activeBusIds, title, devices, selected, all, onAll, toggl
         <div className="device-id"><strong>{device.busId}</strong><span>{device.vidPid}</span></div>
         <div className="row-action">{remote ? mount ? <button className="text-action" disabled={!!busy} aria-label={`断开 ${device.name}`} onClick={() => stopDevice(mount)}>{disconnecting ? "正在断开…" : "断开"}</button> : <button className="text-action" disabled={!selectable} aria-label={`连接 ${device.name}`} onClick={() => attach([device.busId])}>{busy === "attach" && activeBusIds.includes(device.busId) ? "正在连接…" : "连接"}</button> : device.shared ? <button className="danger-action" disabled={stopUnavailable || !!busy} onClick={() => unshare(device.busId)}>{stopping ? "正在停止…" : "停止共享"}</button> : <button className="text-action" disabled={!selectable} aria-label={`共享 ${device.name}`} onClick={() => share([device.busId])}>{busy === "share" && activeBusIds.includes(device.busId) ? "正在共享…" : "共享"}</button>}</div>
       </div>;
-    }) : <div className="empty-list">{loading ? <ArrowClockwise20Regular className="spin" /> : <UsbPlug20Regular />}<strong>{loading ? "正在读取设备…" : peerProblem || (unavailable ? "设备状态待确认" : emptyTitle || (remote ? "没有发现远程 USB 设备" : "没有发现 USB 设备"))}</strong><span>{loading ? "设备列表就绪后会显示在这里" : peerProblem ? "对方打开 USBLink 并共享后会自动更新" : unavailable ? "请检查上方提示，恢复后刷新" : remote ? "确认远程电脑已经共享设备" : "插入设备后点击刷新"}</span></div>}</div>
+    }) : <div className="empty-list">{loading ? <ArrowClockwise20Regular className="spin" /> : <UsbPlug20Regular />}<strong>{loading ? "正在读取设备…" : peerProblem || (unavailable ? "设备状态待确认" : emptyTitle || (remote ? "没有发现远程 USB 设备" : "没有发现 USB 设备"))}</strong><span>{loading ? "设备列表就绪后会显示在这里" : peerProblem ? "对方打开 USBLink 并共享后会自动更新" : unavailable ? "请检查上方提示，恢复后刷新" : remote ? "确认来源手机或电脑已经开启共享" : "插入设备后点击刷新"}</span></div>}</div>
   </section>;
 }
 
@@ -823,7 +852,7 @@ function SettingsPage({ environment, prefs, savingPreference, updatePreference, 
   const dirty = relayDraft.trim() !== savedRelay;
   return <><PageHeader title="设置" subtitle="连接方式与运行偏好" icon={Settings20Regular} onRefresh={checkComponents} spinning={checkingComponents} /><div className="settings-layout">
     <section><h2>运行偏好</h2><Preference label="自动刷新设备" text="定时更新本机和远程 USB 状态" checked={prefs.autoRefresh} change={value => updatePreference("autoRefresh", value)} /><Preference label="开机启动 USBLink" text={savingPreference ? "正在保存 Windows 启动设置…" : "登录 Windows 后自动打开管理界面"} checked={prefs.autoStart} disabled={savingPreference} change={value => updatePreference("autoStart", value)} /></section>
-    <section><h2>网络</h2><form className="relay-setting" onSubmit={event => { event.preventDefault(); saveRelay(); }}><p><strong>EasyTier 中继节点</strong><span>直连失败时使用；配对码会把这个地址带给另一台电脑。</span></p><div><input aria-label="EasyTier 中继节点" aria-invalid={!!relayProblem} aria-describedby="relay-feedback" autoComplete="off" spellCheck={false} disabled={!!busy} value={relayDraft} onChange={event => setRelayDraft(event.target.value)} /><button type="submit" className="secondary-button" disabled={!!busy || !dirty}>{busy === "mesh-relay" ? "正在保存…" : "保存"}</button></div>
+    <section><h2>网络</h2><form className="relay-setting" onSubmit={event => { event.preventDefault(); saveRelay(); }}><p><strong>EasyTier 中继节点</strong><span>直连失败时使用；配对码会把这个地址带给加入网络的手机或电脑。</span></p><div><input aria-label="EasyTier 中继节点" aria-invalid={!!relayProblem} aria-describedby="relay-feedback" autoComplete="off" spellCheck={false} disabled={!!busy} value={relayDraft} onChange={event => setRelayDraft(event.target.value)} /><button type="submit" className="secondary-button" disabled={!!busy || !dirty}>{busy === "mesh-relay" ? "正在保存…" : "保存"}</button></div>
     <div className="field-feedback"><span id="relay-feedback" className={relayProblem ? "field-error" : "field-hint"} role={relayProblem ? "alert" : undefined}>{relayProblem || (busy === "mesh-relay" ? "正在应用中继地址，请稍候" : dirty ? "有未保存的修改，按 Enter 保存" : "当前地址已保存")}</span>{dirty && <button type="button" className="text-action" disabled={!!busy} onClick={() => setRelayDraft(savedRelay)}>撤销修改</button>}</div></form></section>
     <section><h2>组件状态</h2><p className="component-help">EasyTier 已内置；USB 驱动安装完成后会自动刷新。</p>
       <Dependency name="EasyTier" ready info={`已内置 ${environment.easytierVersion}`} opening={openingDownload === "easytier"} disabled={!!openingDownload} open={() => openDownload("easytier")} />
