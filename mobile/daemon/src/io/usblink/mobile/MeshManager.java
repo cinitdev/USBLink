@@ -5,7 +5,9 @@ import java.io.File;
 import java.io.IOException;
 import java.io.InputStream;
 import java.net.InetAddress;
+import java.net.Inet4Address;
 import java.net.InetSocketAddress;
+import java.net.NetworkInterface;
 import java.net.ServerSocket;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.AtomicMoveNotSupportedException;
@@ -25,11 +27,23 @@ public final class MeshManager implements MeshNetwork {
     private final Path state,module;
     private final String hostname;
     interface CommandRunner {String run(int timeout,String... args) throws IOException;}
+    interface InterfaceProbe {InterfaceState read() throws IOException;}
+    interface ProcessStarter {Process start(Path module) throws IOException;}
+    static final class InterfaceState {
+        final int index;final boolean up;final List<String> addresses;
+        InterfaceState(int index,boolean up,List<String> addresses){this.index=index;this.up=up;this.addresses=new ArrayList<>(addresses);}
+        boolean has(String address){return index>0 && up && addresses.contains(address);}
+    }
     private final CommandRunner runner;
+    private final InterfaceProbe interfaceProbe;
+    private final ProcessStarter processStarter;
     private MeshProfile profile;
     private Process process;
     private String ip,problem="尚未创建或加入加密连接",route;
-    private boolean relayConnected,leaveRequested;
+    private boolean relayConnected,leaveRequested,enabled;
+    private boolean statusDegraded;
+    private int interfaceIndex;
+    private String unavailableReason="network_unavailable";
     private List<Object> peers=Collections.emptyList();
     private long retryAt,startedAt;
     private int delaySeconds=2;
@@ -43,7 +57,13 @@ public final class MeshManager implements MeshNetwork {
         this(stateDir,moduleDir,runner,"USBLink-Android");
     }
     private MeshManager(Path stateDir,Path moduleDir,CommandRunner runner,String hostname) throws IOException {
-        this.runner=runner;
+        this(stateDir,moduleDir,runner,hostname,MeshManager::readInterface,MeshManager::startProcess);
+    }
+    MeshManager(Path stateDir,Path moduleDir,CommandRunner runner,InterfaceProbe probe,ProcessStarter starter) throws IOException {
+        this(stateDir,moduleDir,runner,"USBLink-Android",probe,starter);
+    }
+    private MeshManager(Path stateDir,Path moduleDir,CommandRunner runner,String hostname,InterfaceProbe probe,ProcessStarter starter) throws IOException {
+        this.runner=runner;this.interfaceProbe=probe;this.processStarter=starter;
         String name=DeviceNames.clean(hostname);this.hostname=name.isEmpty()?"USBLink-Android":name;
         state=stateDir;module=moduleDir;
         Files.createDirectories(state);
@@ -53,13 +73,13 @@ public final class MeshManager implements MeshNetwork {
             if(Files.size(saved)>4096)throw new IOException("网络配置文件无效");
             privateMode(saved,false);
             profile=MeshProfile.parse(new String(Files.readAllBytes(saved),StandardCharsets.UTF_8));
-            problem="正在启动加密网络";
+            problem=null;
         }
     }
     @Override public synchronized Map<String,Object> status() {
-        return Json.map("configured",profile!=null,"running",ip!=null && relayConnected,"localIp",ip,
+        return Json.map("configured",profile!=null,"running",ip!=null && relayConnected,"paused",!enabled,"localIp",ip,
             "networkName",profile==null?null:profile.name,"relay",relay(),"peers",new ArrayList<>(peers),
-            "problem",problem);
+            "problem",problem,"statusDegraded",statusDegraded,"unavailableReason",ip==null?unavailableReason:null);
     }
     @Override public synchronized String create() throws IOException {replace(MeshProfile.create());return profile.encode();}
     @Override public synchronized void join(String code) throws IOException {replace(MeshProfile.decode(code));}
@@ -71,11 +91,23 @@ public final class MeshManager implements MeshNetwork {
         replace(new MeshProfile(profile.name,profile.secret,MeshProfile.validateRelay(relay.trim())));
     }
     private void replace(MeshProfile replacement) throws IOException {
+        boolean resume=enabled;
         stop();
         if(process!=null && process.isAlive())throw new IOException("旧网络进程尚未退出，请稍后重试");
         if(route!=null)throw new IOException("旧网络规则尚未清理，请稍后重试");
         writePrivate(state.resolve("mesh.json"),Json.stringify(replacement.json()));
-        profile=replacement;leaveRequested=false;retryAt=0;delaySeconds=2;problem="正在启动加密网络";
+        profile=replacement;leaveRequested=false;enabled=resume;retryAt=0;delaySeconds=2;problem=enabled?"正在启动加密网络":null;
+    }
+    @Override public synchronized void setEnabled(boolean next) throws IOException {
+        if(next) {
+            if(leaveRequested)throw new IOException("退出网络尚未完成，请先完成清理");
+            if(!enabled){enabled=true;retryAt=0;delaySeconds=2;problem=profile==null?"请先创建或加入设备网络":"正在启动加密网络";}
+        } else {
+            stop();
+            if(process!=null && process.isAlive())throw new IOException(problem);
+            if(route!=null)throw new IOException(problem);
+            problem=null;
+        }
     }
     @Override public synchronized void leave() throws IOException {
         leaveRequested=true;
@@ -92,55 +124,86 @@ public final class MeshManager implements MeshNetwork {
     @Override public synchronized void tick() throws IOException {
         // A failed exit is a cleanup request, never permission to restart the old mesh.
         if(leaveRequested) {finishLeave();return;}
-        if(profile==null)return;
+        if(!enabled || profile==null)return;
         long now=System.nanoTime()/1_000_000;
         if(process==null || !process.isAlive()) {
-            ip=null;relayConnected=false;peers=Collections.emptyList();
+            unavailable("network_process_exited","加密网络进程已退出，正在等待恢复");
             if(!clearRoute()) {problem="旧网络规则尚未清理，请检查 Root 权限后重试";return;}
             if(process!=null) {process=null;retryAt=now+delaySeconds*1000L;delaySeconds=Math.min(60,delaySeconds*2);problem="加密网络进程已退出，正在等待恢复";}
             if(now<retryAt)return;
             try {
-                // Do not query another instance's RPC after a bind failure.
-                try(ServerSocket probe=new ServerSocket()) {probe.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"),15891));}
                 writePrivate(state.resolve("mesh.toml"),toml(profile,hostname));
-                ProcessBuilder builder=new ProcessBuilder("/system/bin/sh",module.resolve("bin/mesh-run.sh").toString(),module.toString());
-                // EasyTier may print its parsed configuration on startup. Never retain that output.
-                builder.redirectOutput(new File("/dev/null")).redirectError(new File("/dev/null"));
-                builder.environment().keySet().removeIf(key->key.startsWith("ET_"));
-                process=builder.start();startedAt=now;problem="正在连接公共中继";
+                process=processStarter.start(module);startedAt=now;problem="正在连接公共中继";
             }catch(IOException e) {retryAt=now+delaySeconds*1000L;delaySeconds=Math.min(60,delaySeconds*2);throw new IOException("加密网络启动失败，请检查模块组件和 Root 权限");}
             return;
         }
+        String candidate=null;boolean handshake=false,observed=false;List<Object> fresh=new ArrayList<>();
         try {
             String text=command(3000,module.resolve("bin/easytier-cli").toString(),"-p",RPC,"-o","json","peer","list");
             Object decoded=Json.parse(text);
             if(decoded instanceof Map)decoded=Json.object(decoded).get("result");
             if(!(decoded instanceof List))throw new IOException("加密网络状态格式无效");
-            String candidate=null;boolean handshake=false;List<Object> fresh=new ArrayList<>();
             for(Object value:(List<?>)decoded) {
                 Map<String,Object> item=Json.object(value);
                 String address=string(item,"ipv4"),name=string(item,"hostname"),cost=string(item,"cost");
-                if(cost.equalsIgnoreCase("local")) {if(validIpv4(address))candidate=address;continue;}
+                if(cost.equalsIgnoreCase("local")) {
+                    if(validIpv4(address)) {
+                        if(candidate!=null && !candidate.equals(address))throw new IOException("本机网络地址不明确");
+                        candidate=address;
+                    }
+                    continue;
+                }
                 if(name.toLowerCase(java.util.Locale.ROOT).startsWith("publicserver")) {handshake=true;continue;}
                 if(validIpv4(address))fresh.add(Json.map("name",name,"ip",address,"latency",string(item,"lat_ms")));
             }
-            if(candidate==null) {ip=null;clearRoute();problem="本机网络服务已响应，等待分配虚拟地址";}
-            else {
-                ensureRoute(candidate);ip=candidate;
-                problem=handshake?null:now-startedAt>20000?"公共中继尚未连接，请检查网络或更换中继":"正在连接公共中继";
-            }
-            peers=fresh;relayConnected=handshake;
-            if(now-startedAt>60000)delaySeconds=2;
+            observed=candidate!=null;
         }catch(IOException|IllegalArgumentException e) {
-            ip=null;relayConnected=false;peers=Collections.emptyList();
-            problem="无法确认加密网络状态，请检查 Root 权限、TUN 或端口占用";
+            candidate=null;
         }
+        // RPC describes peers/relay health, not the lifetime of an established USB socket.
+        // On a failed/incomplete observation, reuse an address only after independent live
+        // verification of this child, the same TUN interface/address and the owned route.
+        if(!process.isAlive()){unavailable("network_process_exited","加密网络进程已退出，共享已暂停");return;}
+        String address=observed?candidate:ip;
+        InterfaceState link;
+        try{link=interfaceProbe.read();}
+        catch(IOException e){unavailable("network_interface_lost","无法读取设备网络接口，共享已暂停");return;}
+        if(link==null || !link.up || link.index<=0 || (interfaceIndex!=0 && link.index!=interfaceIndex)) {
+            unavailable("network_interface_lost","设备网络接口已断开或重建，共享已暂停");return;
+        }
+        if(address==null){unavailable("network_status_unconfirmed","等待确认本机虚拟网络地址");return;}
+        if(!link.has(address)){unavailable("network_interface_lost","设备网络地址已移除或改变，共享已暂停");return;}
+        try{ensureRoute(address);}
+        catch(IOException e){
+            unavailable(e instanceof RouteCheckException?((RouteCheckException)e).reason:"network_route_unavailable",
+                e instanceof RouteCheckException?e.getMessage():"网络规则本地记录无法读取或更新，共享已暂停");return;
+        }
+        // Route/RPC commands may take time. Do not publish success if the owner or
+        // interface disappeared while they ran; never treat a replaced interface as old.
+        try {
+            InterfaceState confirmed=interfaceProbe.read();
+            if(!process.isAlive()){unavailable("network_process_exited","加密网络进程已退出，共享已暂停");return;}
+            if(confirmed==null || confirmed.index!=link.index || !confirmed.has(address)) {
+                unavailable("network_interface_lost","设备网络接口已断开或重建，共享已暂停");return;
+            }
+        }catch(IOException e){unavailable("network_interface_lost","无法读取设备网络接口，共享已暂停");return;}
+        ip=address;interfaceIndex=link.index;statusDegraded=!observed;
+        peers=observed?fresh:Collections.emptyList();relayConnected=observed && handshake;
+        problem=!observed?"网络状态查询暂不可用；本机接口与路由正常，共享保持运行":
+            handshake?null:now-startedAt>20000?"公共中继尚未连接，请检查网络或更换中继":"正在连接公共中继";
+        if(now-startedAt>60000)delaySeconds=2;
+    }
+    private void unavailable(String reason,String message) {
+        ip=null;interfaceIndex=0;relayConnected=false;statusDegraded=false;peers=Collections.emptyList();
+        unavailableReason=reason;problem=message;
     }
     @Override public synchronized String localIp() {return ip;}
+    @Override public synchronized String unavailableReason(){return unavailableReason;}
     @Override public synchronized byte[] presenceKey()throws IOException{return profile==null?null:PresenceServer.key(profile.secret);}
     @Override public synchronized String relay() {return profile==null?MeshProfile.DEFAULT_RELAY:profile.relay;}
     @Override public synchronized void stop() {
-        ip=null;relayConnected=false;peers=Collections.emptyList();
+        enabled=false;
+        unavailable("network_unavailable",null);
         if(process!=null) {
             process.destroy();
             try {if(!process.waitFor(1500,TimeUnit.MILLISECONDS)) {process.destroyForcibly();process.waitFor(1000,TimeUnit.MILLISECONDS);}}
@@ -163,22 +226,19 @@ public final class MeshManager implements MeshNetwork {
             "[flags]\nforeign_network_whitelist = \""+profile.name+"\"\n";
     }
     void ensureRoute(String address) throws IOException {
-        String routes=command(1500,"/system/bin/ip","-4","route","show","dev","usblink0");
-        String prefix=null;
-        for(String line:routes.split("\\r?\\n")) {
-            String first=line.trim().split("\\s+")[0];
-            if(validMeshRoute(first,address)) {prefix=first;break;}
-        }
-        if(prefix==null)throw new IOException("虚拟网络路由尚未就绪");
-        if(route!=null && !prefix.equals(route) && !clearRoute())throw new IOException("旧网络规则尚未清理，已取消更改路由");
-        String rules=command(1500,"/system/bin/ip","-4","rule","show");
+        String prefix=matchingRoute(readRouteState("route","show","dev","usblink0"),address);
+        // Android can briefly expose an empty table while rebuilding its routes.
+        if(prefix==null)prefix=matchingRoute(readRouteState("route","show","dev","usblink0"),address);
+        if(prefix==null)throw new RouteCheckException("network_route_missing","设备网络缺少匹配的子网路由，共享已暂停");
+        if(route!=null && !prefix.equals(route) && !clearRoute())throw new RouteCheckException("network_route_conflict","旧网络规则尚未清理，已取消更改路由");
+        String rules=readRouteState("rule","show");
         boolean found=false;
         for(String line:rules.split("\\r?\\n")) {
             if(line.trim().startsWith("17891:")) {
                 Path record=state.resolve("mesh.route");
                 if(!exactRule(line,prefix) || !Files.exists(record) || Files.size(record)>64 ||
                     !new String(Files.readAllBytes(record),StandardCharsets.UTF_8).trim().equals(prefix))
-                    throw new IOException("虚拟网络规则优先级已被其他程序使用");
+                    throw new RouteCheckException("network_route_conflict","虚拟网络规则优先级或所有权记录冲突，共享已暂停");
                 found=true;
             }
         }
@@ -187,17 +247,45 @@ public final class MeshManager implements MeshNetwork {
         // Reconcile actual rules on every tick, even while the interface/IP is unchanged.
         writePrivate(state.resolve("mesh.route"),prefix);
         route=prefix; // Retain the cleanup identity even if add or confirmation fails.
-        command(1500,"/system/bin/ip","-4","rule","add","priority","17891","to",prefix,"lookup","main");
-        String confirmed=command(1500,"/system/bin/ip","-4","rule","show");
+        // An add command can time out after the kernel has applied it. Submit once,
+        // then confirm actual state; never add again just because its exit was uncertain.
+        try{command(4000,"/system/bin/ip","-4","rule","add","priority","17891","to",prefix,"lookup","main");}
+        catch(IOException ignored){ /* Confirmation below remains mandatory. */ }
+        String confirmed=readRouteState("rule","show");
         boolean ready=false;
         for(String line:confirmed.split("\\r?\\n"))if(line.trim().startsWith("17891:")) {
-            if(!exactRule(line,prefix))throw new IOException("虚拟网络规则与其他程序冲突");
+            if(!exactRule(line,prefix))throw new RouteCheckException("network_route_conflict","虚拟网络规则与其他程序冲突，共享已暂停");
             ready=true;
         }
-        if(!ready)throw new IOException("无法确认虚拟网络规则已生效");
+        if(!ready)throw new RouteCheckException("network_route_missing","无法确认虚拟网络规则已生效，共享已暂停");
     }
     private static boolean exactRule(String line,String prefix) {
-        return line.trim().replaceAll("\\s+"," ").equals("17891: from all to "+prefix+" lookup main");
+        // iproute2 builds can print table 254 instead of its alias main. Only
+        // accept equivalent selectors; marks, interfaces and suppression remain conflicts.
+        return line.trim().replaceAll("\\s+"," ").matches("17891: from (?:all|0\\.0\\.0\\.0/0) to "+
+            java.util.regex.Pattern.quote(prefix)+" (?:lookup|table) (?:main|254)(?: (?:proto|protocol) [A-Za-z0-9_-]+)?");
+    }
+    private static String matchingRoute(String routes,String address) {
+        for(String line:routes.split("\\r?\\n")) {
+            String first=line.trim().split("\\s+")[0];
+            if(validMeshRoute(first,address))return first;
+        }
+        return null;
+    }
+    private static final class RouteCheckException extends IOException {
+        final String reason;
+        RouteCheckException(String reason,String message){super(message);this.reason=reason;}
+    }
+    private String readRouteState(String... operation)throws IOException {
+        String[] args=new String[operation.length+2];args[0]="/system/bin/ip";args[1]="-4";
+        System.arraycopy(operation,0,args,2,operation.length);
+        // One additional read-only observation resolves a transient command failure.
+        // This neither repeats a route mutation nor imports/reconnects a USB device.
+        try{return command(4000,args);}
+        catch(IOException first) {
+            try{return command(4000,args);}
+            catch(IOException second){throw new RouteCheckException("network_route_query_failed","连续两次读取网络路由或规则失败／超时，共享已暂停");}
+        }
     }
     private boolean clearRoute() {
         if(route!=null) {
@@ -242,6 +330,22 @@ public final class MeshManager implements MeshNetwork {
         catch(AtomicMoveNotSupportedException e) {Files.move(temporary,target,StandardCopyOption.REPLACE_EXISTING);}
     }
     private String command(int timeout,String... args) throws IOException {return runner.run(timeout,args);}
+    private static InterfaceState readInterface() throws IOException {
+        NetworkInterface link=NetworkInterface.getByName("usblink0");
+        if(link==null)return null;
+        List<String> addresses=new ArrayList<>();
+        for(InetAddress address:Collections.list(link.getInetAddresses()))if(address instanceof Inet4Address)addresses.add(address.getHostAddress());
+        return new InterfaceState(link.getIndex(),link.isUp(),addresses);
+    }
+    private static Process startProcess(Path module) throws IOException {
+        // Do not query another instance's RPC after a bind failure.
+        try(ServerSocket probe=new ServerSocket()) {probe.bind(new InetSocketAddress(InetAddress.getByName("127.0.0.1"),15891));}
+        ProcessBuilder builder=new ProcessBuilder("/system/bin/sh",module.resolve("bin/mesh-run.sh").toString(),module.toString());
+        // EasyTier may print its parsed configuration on startup. Never retain that output.
+        builder.redirectOutput(new File("/dev/null")).redirectError(new File("/dev/null"));
+        builder.environment().keySet().removeIf(key->key.startsWith("ET_"));
+        return builder.start();
+    }
     private static String runCommand(int timeout,String... args) throws IOException {
         Process p=new ProcessBuilder(args).redirectError(new File("/dev/null")).start();
         ByteArrayOutputStream bytes=new ByteArrayOutputStream();

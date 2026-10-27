@@ -11,9 +11,12 @@ public interface SharingTransport extends Closeable {
     boolean active(String kind);
     int boundPort(String kind);
     void stopAll();
+    default void stopAll(String reason){stopAll();}
     void disconnect(String id) throws IOException;
     List<Map<String,Object>> snapshot();
     void close();
     default boolean usb(){return false;}
     default Map<String,Object> export(){return null;}
+    default Map<String,Object> lastDisconnect(){return null;}
+    default AdbHistory history(){return null;}
 }

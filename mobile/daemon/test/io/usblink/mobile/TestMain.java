@@ -18,7 +18,7 @@ import java.util.function.BooleanSupplier;
 public final class TestMain {
     private static int checks;
     public static void main(String[] args) throws Exception {
-        jsonProtocol(); largeTransferAndHalfClose(); revokeSessions(); failedConnectCleanup(); sharingLifecycle(); corruptedStore(); legacyPreference(); statusSnapshot();
+        jsonProtocol(); largeTransferAndHalfClose(); revokeSessions(); failedConnectCleanup(); sharingLifecycle(); networkPowerLifecycle(); corruptedStore(); legacyPreference(); statusSnapshot();
         System.out.println("PASS: " + checks + " mobile backend checks");
     }
     private static void check(boolean yes,String message) {checks++;if(!yes)throw new AssertionError(message);}
@@ -107,7 +107,7 @@ public final class TestMain {
             platform.failure=false;control.tick();check(!proxy.active("adb") && platform.starts==1,"Failure requires explicit off/on, no restart loop");
             control.handle("set-sharing",Json.map("enabled",false));
             check(!store.load() && !enabled(control) && !proxy.active("adb"),"Off persists and restores");
-            check(Boolean.TRUE.equals(Json.object(control.status().get("appSession")).get("ready")),"Sharing off retains authenticated app presence");
+            check(Boolean.FALSE.equals(Json.object(control.status().get("appSession")).get("ready")),"Sharing off revokes authenticated app presence");
             control.tick();check(!proxy.active("adb"),"Polling never undoes explicit off");
             control.handle("set-sharing",Json.map("enabled",true));check(platform.starts==2,"Manual re-enable starts one new operation");
             platform.restoreFailure=true;int stopsBefore=platform.stops;
@@ -136,6 +136,40 @@ public final class TestMain {
             controller.tick();check(!enabled(controller) && state(controller).equals("error"),"Corrupt config fails closed visibly");
             controller.handle("set-sharing",Json.map("enabled",false));check(state(controller).equals("off"),"Explicit off repairs malformed preference");
         }
+    }
+    private static void networkPowerLifecycle()throws Exception {
+        SharingStore store=new SharingStore(Files.createTempDirectory("usblink-power-test-"));
+        FakePlatform phone=new FakePlatform();phone.port=32123;
+        FakeMesh mesh=new FakeMesh();mesh.ip="127.0.0.1";
+        try(ProxyPool proxy=new ProxyPool();Controller c=new Controller(phone,mesh,store,proxy,0)) {
+            c.tick();String code=mesh.pairingCode();int stops=phone.stops;
+            for(int i=0;i<20;i++){c.tick();c.handle("status",Json.map());}
+            check(mesh.ticks==0 && !mesh.requested,"Saved network never starts or polls while sharing is off");
+            check(phone.stops==stops,"Idle observations do not repeat adbd restoration");
+            check(c.observationDelaySeconds()==5,"Clean off uses five-second observations within snapshot freshness");
+            c.handle("create-mesh",Json.map());c.handle("join-mesh",Json.map("code","test"));c.handle("set-relay",Json.map("relay","tcp://test:11010"));c.tick();
+            check(!mesh.requested && mesh.ticks==0,"Editing a saved network while off cannot start it");
+            c.handle("set-sharing",Json.map("enabled",true));c.tick();
+            check(mesh.requested && mesh.ticks==1 && proxy.active("adb"),"Enable resumes the saved network and transport");
+            check(c.observationDelaySeconds()==2,"Sharing keeps existing protection cadence");
+            phone.restoreFailure=true;
+            expectFailure(()->c.handle("set-sharing",Json.map("enabled",false)),"Failed adbd restore stays visible");
+            check(!mesh.requested && !proxy.active("adb") && !store.load(),"Restore failure still stops network and persists off");
+            check(Boolean.FALSE.equals(Json.object(c.status().get("appSession")).get("ready")),"Off stops presence even on cleanup failure");
+            phone.restoreFailure=false;c.handle("set-sharing",Json.map("enabled",false));
+            c.handle("set-sharing",Json.map("enabled",true));mesh.stopFailure=true;
+            expectFailure(()->c.handle("set-sharing",Json.map("enabled",false)),"Failed network stop is not reported as successful off");
+            check(state(c).equals("error") && !proxy.active("adb") && !store.load(),"Network cleanup failure stays retryable with sharing revoked");
+            int pauses=mesh.pauses;stops=phone.stops;
+            for(int i=0;i<10;i++)c.tick();
+            check(mesh.pauses==pauses && phone.stops==stops,"Observation never replays failed cleanup or starts the network");
+            mesh.stopFailure=false;c.handle("set-sharing",Json.map("enabled",false));
+            check(state(c).equals("off") && mesh.pairingCode().equals(code),"Explicit cleanup retry preserves pairing without reboot");
+            c.handle("set-sharing",Json.map("enabled",true));
+            check(proxy.active("adb") && mesh.pairingCode().equals(code),"Re-enable reuses pairing and requires no daemon restart");
+            c.handle("set-sharing",Json.map("enabled",false));
+        }
+        try(Controller c=new Controller(phone,mesh,store,new ProxyPool(),0)) {c.tick();check(!mesh.requested && !enabled(c),"A reboot with saved off leaves the mesh disconnected");}
     }
     private static void legacyPreference()throws Exception {
         Path dir=Files.createTempDirectory("usblink-legacy-test-");Files.writeString(dir.resolve("sharing.json"),Json.stringify(Json.map("version",1,"enabled",true)));
@@ -168,11 +202,13 @@ public final class TestMain {
         public void openDebugSettings(){settingsOpened=true;}
     }
     static final class FakeMesh implements MeshNetwork {
-        String ip;boolean tickFailure;
-        public Map<String,Object> status(){return Json.map("configured",true,"running",true,"localIp",ip,"networkName","test","peers",new ArrayList<>(),"problem",null);}
+        String ip;boolean tickFailure,requested,stopFailure;int ticks,pauses;
+        public Map<String,Object> status(){return Json.map("configured",true,"running",requested && ip!=null,"paused",!requested,"localIp",localIp(),"networkName","test","peers",new ArrayList<>(),"problem",null);}
         public String create(){return "test";}public void join(String code){}public String pairingCode(){return "test";}
-        public void leave(){ip=null;}public void setRelay(String relay){}public void tick()throws IOException{if(tickFailure)throw new IOException("模拟组网失败");}public void stop(){}
-        public String localIp(){return ip;}public String relay(){return "tcp://183.230.36.171:11010";}
+        public void leave(){ip=null;requested=false;}public void setRelay(String relay){}
+        public void setEnabled(boolean value)throws IOException{requested=value;if(!value){pauses++;if(stopFailure)throw new IOException("模拟网络停止失败");}}
+        public void tick()throws IOException{ticks++;if(tickFailure)throw new IOException("模拟组网失败");}public void stop(){requested=false;}
+        public String localIp(){return requested?ip:null;}public String relay(){return "tcp://183.230.36.171:11010";}
         public byte[] presenceKey(){return new byte[32];}
     }
 }

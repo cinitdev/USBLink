@@ -54,6 +54,16 @@ final class TcpAdb {
     synchronized int maintainPort() throws IOException {
         return port(true);
     }
+    synchronized void prepareRestart()throws IOException {
+        if(!Files.exists(journal))return;
+        Map<String,Object> entry=read();
+        if(!system.bootId().equals(Json.string(entry,"boot")) || !String.valueOf(PORT).equals(system.property("service.adb.tcp.port")) ||
+            !Json.string(entry,"persistent").equals(system.property("persist.adb.tcp.port")) || !system.property("service.adb.listen_addrs").isEmpty())
+            throw new IOException("现有调试端口状态尚未确认，请先关闭共享完成恢复，再切换 ADB Root");
+        system.verifyProtection();
+        if(system.listening(PORT) && !system.ownedListener(PORT))throw new IOException("内部调试端口来源无法确认，已取消 ADB Root 切换");
+        startDeadline=system.elapsed()+10_000;
+    }
     private int port(boolean maintain) throws IOException {
         if(!Files.exists(journal))return 0;
         system.requireAuthorization();

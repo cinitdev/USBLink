@@ -5,6 +5,10 @@ case "${2:-e30=}" in *[!A-Za-z0-9+/=]*) echo '{"ok":false,"error":"无效请求"
 if [ "$1" = status ]; then
   . "$MODDIR/bin/common.sh"
   read_status && exit 0
+  if [ -s "$STATE/startup.error" ]; then
+    echo '{"ok":false,"error":"后台启动失败，请在模块管理器点击操作查看具体原因；旧版本覆盖安装不会清除运行记录。"}'
+    exit 1
+  fi
   echo '{"ok":false,"error":"后台状态尚未确认，服务可能正在启动、处理操作或已停止，请稍后刷新。"}'
   exit 1
 fi

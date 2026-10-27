@@ -30,16 +30,20 @@ if ($ExperimentalUsb) {
   $Sources += @(Get-ChildItem (Join-Path $MobileRoot 'experimental/usbip/src'), (Join-Path $MobileRoot 'experimental/usbip/module') -Recurse -Filter '*.java' | ForEach-Object { $_.FullName })
 }
 if (-not $SkipTests) {
+  Invoke-Checked 'node' @((Join-Path $MobileRoot 'tests/root-managers.mjs'))
   $HostSources = @($Sources | Where-Object { [IO.Path]::GetFileName($_) -notin @('Main.java', 'AndroidPlatform.java') })
   $Tests = @(Get-ChildItem (Join-Path $MobileRoot 'daemon/test') -Recurse -Filter '*.java' | ForEach-Object { $_.FullName })
   if ($ExperimentalUsb) { $Tests += @(Get-ChildItem (Join-Path $MobileRoot 'experimental/usbip/test'), (Join-Path $MobileRoot 'experimental/usbip/module-test') -Recurse -Filter '*.java' | ForEach-Object { $_.FullName }) }
   Invoke-Checked 'javac' (@('--release', '11', '-encoding', 'UTF-8', '-d', $TestClasses) + $HostSources + $Tests)
   Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.TestMain')
   Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.MeshTestMain')
+  Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.MeshObservationTestMain')
   Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.DeviceNamesTestMain')
   Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.PresenceTestMain')
   Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.TcpAdbTestMain')
   Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.SharingStartupTestMain')
+  Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.AdbHistoryTestMain')
+  Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.AdbRootTestMain')
   if ($ExperimentalUsb) {
     Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.usbip.ProtocolTest')
     Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.UsbModuleTest')

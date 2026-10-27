@@ -54,7 +54,33 @@ public final class MeshTestMain {
         }
         routeReconciliation();
         pendingLeave();
+        pausedNetwork();
         System.out.println("PASS: "+checks+" mobile mesh checks");
+    }
+    private static void pausedNetwork()throws Exception {
+        Path state=Files.createTempDirectory("usblink-paused-network-");
+        FakeIp ip=new FakeIp();MeshManager manager=new MeshManager(state,state,ip);
+        String code=manager.create();byte[] saved=Files.readAllBytes(state.resolve("mesh.json"));
+        for(int i=0;i<20;i++)manager.tick();
+        check(Boolean.TRUE.equals(manager.status().get("paused")) && manager.localIp()==null,"Create stores a disconnected network");
+        check(!Files.exists(state.resolve("mesh.toml")),"Off does not launch EasyTier or generate its runtime configuration");
+        manager.setEnabled(true);manager.setEnabled(false);
+        for(int i=0;i<10;i++)manager.tick();
+        check(java.util.Arrays.equals(saved,Files.readAllBytes(state.resolve("mesh.json"))) && code.equals(manager.pairingCode()),"Pause preserves exact profile bytes and pairing code");
+        MeshManager rebooted=new MeshManager(state,state,ip);rebooted.tick();
+        check(Boolean.TRUE.equals(rebooted.status().get("paused")) && code.equals(rebooted.pairingCode()),"Saved profile alone never authorizes networking after reboot");
+        manager.ensureRoute("10.126.126.2");ip.failDelete=true;
+        reject(()->manager.setEnabled(false),"Pause reports failed network rule cleanup");
+        check(Files.exists(state.resolve("mesh.route")) && manager.status().get("problem")!=null,"Failed pause retains recovery identity and visible problem");
+        manager.tick();check(!Files.exists(state.resolve("mesh.toml")),"Failed pause cannot restart networking");
+        ip.failDelete=false;manager.setEnabled(false);
+        check(!Files.exists(state.resolve("mesh.route")) && manager.status().get("problem")==null,"Explicit pause retry confirms cleanup");
+        check(code.equals(manager.pairingCode()),"Recovery does not regenerate pairing");
+        manager.join(code);manager.setRelay(MeshProfile.DEFAULT_RELAY);manager.tick();
+        check(code.equals(manager.pairingCode()) && !Files.exists(state.resolve("mesh.toml")),"Join and relay edit while off only save configuration");
+        manager.leave();
+        check(!Files.exists(state.resolve("mesh.json")),"Only explicit leave removes pairing");
+        Files.delete(state);
     }
     private static void pendingLeave() throws Exception {
         Path state=Files.createTempDirectory("usblink-leave-test-");

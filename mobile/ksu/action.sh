@@ -11,7 +11,10 @@ attempt=0
 while [ "$attempt" -lt 10 ]; do
   result=$("$BUSYBOX" timeout 3 "$MODDIR/bin/usblinkctl" status 2>/dev/null)
   case "$result" in
-    '{"ok":true,'*) echo "USBLink 控制服务已就绪，请打开模块 WebUI。"; exit 0;;
+    '{"ok":true,'*)
+      echo "USBLink 控制服务已就绪，请打开模块 WebUI。"
+      echo "Magisk 用户请在已获 Root 授权的 KsuWebUI 中选择 USBLink。"
+      exit 0;;
   esac
   sleep 1
   attempt=$((attempt+1))

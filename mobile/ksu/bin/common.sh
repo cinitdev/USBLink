@@ -3,10 +3,12 @@ STATE=/data/adb/usblink
 umask 077
 
 find_flock() {
-  for BUSYBOX in /data/adb/ap/bin/busybox /data/adb/ksu/bin/busybox; do
+  # These are the managers' own binaries; never use a WebUI-provided path.
+  for BUSYBOX in /data/adb/ap/bin/busybox /data/adb/ksu/bin/busybox /data/adb/magisk/busybox; do
     [ -x "$BUSYBOX" ] && "$BUSYBOX" --list 2>/dev/null | grep -Fxq flock && return 0
   done
-  echo '管理器缺少 BusyBox flock，无法安全启动或停止守护服务。请更新 APatch / KernelSU。' >&2
+  BUSYBOX=
+  echo '管理器缺少 BusyBox flock，无法安全启动或停止守护服务。请更新 Magisk / APatch / KernelSU。' >&2
   return 1
 }
 
@@ -27,7 +29,7 @@ start_time() {
   case "$1" in ''|*[!0-9]*) return 1;; esac
   [ -r "/proc/$1/stat" ] || return 1
   # comm may contain spaces: starttime is field 20 after the closing parenthesis.
-  fields=$(cat "/proc/$1/stat" 2>/dev/null) || return 1
+  IFS= read -r fields < "/proc/$1/stat" || return 1
   case "$fields" in *') '*) fields=${fields##*) };; *) return 1;; esac
   set -- $fields
   [ "$#" -ge 20 ] || return 1
@@ -42,6 +44,56 @@ write_record() {
   printf '%s %s\n' "$2" "$stamp" > "$1.new" && mv -f "$1.new" "$1"
 }
 
+record_well_formed() {
+  local pid stamp extra
+  read -r pid stamp extra < "$1" || return 1
+  case "$pid:$stamp" in *[!0-9:]*|:*|*::*|*:) return 1;; esac
+  [ -z "$extra" ] && [ "$pid" -gt 1 ]
+}
+
+# Called only while holding both startup locks. Never infer that an unknown PID
+# is safe to kill. A malformed record can be retired only with no module workers.
+runtime_workers_absent() {
+  local proc args executable
+  for proc in /proc/[0-9]*; do
+    [ "${proc##*/}" = "$$" ] && continue
+    args=$(tr '\000' '\n' < "$proc/cmdline" 2>/dev/null) || {
+      [ ! -d "$proc" ] && continue
+      return 1
+    }
+    [ -n "$args" ] || continue
+    executable=$(readlink "$proc/exe" 2>/dev/null) || {
+      [ ! -d "$proc" ] && continue
+      return 1
+    }
+    case "$executable" in "$MODDIR/bin/easytier-core"|"$MODDIR/bin/easytier-core (deleted)") return 1;; esac
+    printf '%s\n' "$args" | grep -Fxq -e usblink-mobile -e --nice-name=usblink-mobile \
+      -e "$MODDIR/bin/mesh-run.sh" -e "$MODDIR/bin/supervise.sh" && return 1
+  done
+  return 0
+}
+
+recover_runtime_records() {
+  local file damaged=0 backup
+  for file in "$STATE/daemon.pid" "$STATE/mesh.pid" "$STATE/supervisor.lock/pid"; do
+    [ ! -f "$file" ] || record_well_formed "$file" || damaged=1
+  done
+  [ "$damaged" -eq 1 ] || return 0
+  runtime_workers_absent || { echo '运行记录损坏，但仍有模块进程或无法确认进程状态；已保留记录，未终止任何进程。' >&2; return 1; }
+  backup="$STATE/recovery-$(date +%s)-$$"
+  mkdir "$backup" || return 1
+  for file in "$STATE/daemon.pid" "$STATE/mesh.pid" "$STATE/supervisor.lock/pid"; do
+    [ -f "$file" ] || continue
+    record_well_formed "$file" && continue
+    case "$file" in */supervisor.lock/pid) mv "$file" "$backup/supervisor.pid" || return 1;;
+      *) mv "$file" "$backup/" || return 1;; esac
+  done
+  for file in status.snapshot startup.error; do
+    [ ! -f "$STATE/$file" ] || mv "$STATE/$file" "$backup/" || return 1
+  done
+  # Pairing, preferences, history and adbd recovery journals are never touched.
+}
+
 # 0: same living process; 1: absent, exited, or PID reused; 2: cannot verify.
 record_current() {
   local extra stamp state
@@ -53,7 +105,7 @@ record_current() {
   stamp=$(start_time "$RECORD_PID") || return 2
   [ -n "$stamp" ] || return 2
   [ "$stamp" = "$RECORD_STAMP" ] || return 1
-  state=$(cat "/proc/$RECORD_PID/stat" 2>/dev/null) || return 2
+  IFS= read -r state < "/proc/$RECORD_PID/stat" || return 2
   case "$state" in *') '*) state=${state##*) }; state=${state%% *};; *) return 2;; esac
   [ "$state" = Z ] && return 1
   [ -n "$state" ] || return 2
@@ -161,7 +213,7 @@ clear_rpc_rule() {
 }
 
 restore_adb() {
-  [ -f "$STATE/adbd-tcp.json" ] || return 0
+  [ -f "$STATE/adbd-tcp.json" ] || [ -f "$STATE/adb-root-recovery.json" ] || return 0
   CLASSPATH="$MODDIR/lib/usblink-daemon.jar" /system/bin/app_process / --nice-name=usblink-restore io.usblink.mobile.Main restore-adb "$STATE" 8>&- 9>&-
 }
 

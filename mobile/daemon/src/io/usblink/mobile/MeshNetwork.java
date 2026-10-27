@@ -9,9 +9,11 @@ public interface MeshNetwork {
     String pairingCode() throws IOException;
     void leave() throws IOException;
     void setRelay(String relay) throws IOException;
+    void setEnabled(boolean enabled) throws IOException;
     void tick() throws IOException;
     void stop();
     String localIp();
+    default String unavailableReason(){return "network_unavailable";}
     String relay();
     byte[] presenceKey() throws IOException;
 }

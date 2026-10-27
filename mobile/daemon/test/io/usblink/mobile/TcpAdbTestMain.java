@@ -6,7 +6,7 @@ import java.util.*;
 public final class TcpAdbTestMain {
     private static int checks;
     public static void main(String[] args)throws Exception {
-        lifecycle();failureRecovery();conflicts();firewall();firewallMaintenance();
+        lifecycle();failureRecovery();conflicts();rootRestart();firewall();firewallMaintenance();
         System.out.println("PASS: "+checks+" system adbd TCP safety checks");
     }
     static void check(boolean value,String message){checks++;if(!value)throw new AssertionError(message);}
@@ -59,6 +59,17 @@ public final class TcpAdbTestMain {
         Files.writeString(path.resolve("adbd-tcp.json"),"broken");reject(tcp::restore,"Malformed recovery record does not guess prior state");
         check(!TcpAdb.validProperty("1;reboot") && !TcpAdb.validProperty("65536") && TcpAdb.validProperty("-1"),"Only valid fixed property values");
     }
+    static void rootRestart()throws Exception {
+        FakeSystem system=new FakeSystem();Path path=dir();system.path=path;TcpAdb tcp=new TcpAdb(path,system);
+        tcp.prepareRestart();check(system.events.isEmpty(),"Root-only change does not create TCP state");
+        tcp.start();system.now=20000;int before=system.restarts;tcp.prepareRestart();system.listening=false;
+        check(tcp.port()==0 && system.restarts==before,"Root restart grants a fresh bounded listener observation window without submitting restart");
+        system.now=31000;reject(tcp::port,"Fresh Root listener window still expires");system.listening=true;
+        system.guard=false;reject(tcp::prepareRestart,"Root change cannot restart an unprotected managed port");system.guard=true;
+        system.foreign=true;reject(tcp::prepareRestart,"Root change cannot adopt another process listener");system.foreign=false;
+        system.persistent="5555";reject(tcp::prepareRestart,"Root change preserves external persistent TCP settings");system.persistent="";
+        tcp.prepareRestart();check(system.restarts==before,"Restart preparation only validates and sets a deadline");tcp.restore();
+    }
     static void firewall()throws Exception {
         FirewallRunner runner=new FirewallRunner();TcpFirewall firewall=new TcpFirewall(runner);
         firewall.install();check(runner.rules.size()==8,"Protect internal, mesh, local clients in both IP families");
@@ -97,12 +108,12 @@ public final class TcpAdbTestMain {
     }
     static final class FakeSystem implements TcpAdb.SystemAccess {
         Path path;String tcp="",persistent="",address="",boot="11111111-1111-1111-1111-111111111111",fail="";
-        boolean auth=true,guard,listening,delay,keepListening,changePersistentOnProtect;int restarts;long now;List<String> events=new ArrayList<>();TcpFirewall firewall;
+        boolean auth=true,guard,listening,delay,keepListening,changePersistentOnProtect,foreign;int restarts;long now;List<String> events=new ArrayList<>();TcpFirewall firewall;
         public String property(String name){switch(name){case "service.adb.tcp.port":return tcp;case "persist.adb.tcp.port":return persistent;case "service.adb.listen_addrs":return address;case "init.svc.adbd":return "running";default:return "";}}
         public void tcpProperty(String value)throws IOException{check(Files.exists(path.resolve("adbd-tcp.json")),"Journal durable before property changes");if(fail.equals("property"))throw new IOException("模拟属性失败");events.add("set:"+value);tcp=value;}
         public void restart()throws IOException{if(fail.equals("restart"))throw new IOException("模拟重启失败");check(guard,"Never restart without guard");events.add("restart");restarts++;if(!keepListening)listening=tcp.equals("15558")&&!delay;}
         public boolean listening(int port){return listening;}
-        public boolean ownedListener(int port){return listening;}
+        public boolean ownedListener(int port){return listening && !foreign;}
         public void protect()throws IOException{if(fail.equals("guard"))throw new IOException("模拟防护失败");events.add("protect");guard=true;if(changePersistentOnProtect)persistent="6666";}
         public void verifyProtection()throws IOException{if(!guard)throw new IOException("模拟防护丢失");if(firewall!=null)firewall.verify();}
         public void maintainProtection()throws IOException{if(firewall!=null)firewall.maintain();else verifyProtection();}

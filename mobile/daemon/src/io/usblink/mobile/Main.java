@@ -21,6 +21,7 @@ import java.util.Base64;
 import java.util.Map;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
 import java.util.concurrent.TimeUnit;
 
 public final class Main {
@@ -28,7 +29,7 @@ public final class Main {
     private static final int MAX_REQUEST=16384;
     public static void main(String[] args) {
         try {
-            if(Process.myUid()!=0)throw new IOException("请从 APatch 或 KernelSU 模块 WebUI 启动，需要 Root 权限");
+            if(Process.myUid()!=0)throw new IOException("模块控制需要 Root 权限；请授权 APatch／KernelSU 管理器或 Magisk 下的 KsuWebUI");
             if(args.length==3 && args[0].equals("serve"))serve(Paths.get(args[1]),Paths.get(args[2]));
             else if(args.length==2 && args[0].equals("restore-adb"))restoreAdb(Paths.get(args[1]));
             else if((args.length==2 || args.length==3) && args[0].equals("ctl"))client(args[1],args.length==3?args[2]:"e30=");
@@ -48,12 +49,29 @@ public final class Main {
                 StatusSnapshot snapshot=new StatusSnapshot(state,Process.myPid(),selfStartTicks(),
                     new String(Files.readAllBytes(Paths.get("/proc/sys/kernel/random/boot_id")),StandardCharsets.US_ASCII).trim(),
                     ()->android.os.SystemClock.elapsedRealtime()/1000);
-                Controller controller=new Controller(platform,new MeshManager(state,module,Json.string(platform.device(),"name")),new SharingStore(state,TransportFactory.USB?3:2),TransportFactory.create(platform))) {
+                AdbHistory history=new AdbHistory(state);
+                Controller controller=new Controller(platform,new MeshManager(state,module,Json.string(platform.device(),"name")),new SharingStore(state,TransportFactory.USB?3:2),TransportFactory.create(platform,history))) {
                 ScheduledExecutorService scheduler=Executors.newSingleThreadScheduledExecutor(r->{Thread t=new Thread(r,"usblink-state");t.setDaemon(true);return t;});
-                Runtime.getRuntime().addShutdownHook(new Thread(()->{try{snapshot.close();}catch(IOException ignored){}controller.close();scheduler.shutdownNow();},"usblink-shutdown"));
-                scheduler.scheduleWithFixedDelay(()->{
-                    synchronized(controller){controller.tick();publish(snapshot,controller);}
-                },0,2,TimeUnit.SECONDS);
+                Runtime.getRuntime().addShutdownHook(new Thread(()->{try{snapshot.close();}catch(IOException ignored){}controller.close();history.close();scheduler.shutdownNow();},"usblink-shutdown"));
+                // All scheduling and generation changes hold the controller lock. A mutation
+                // wakes observation immediately; an older queued task cannot create a second loop.
+                class Observer {
+                    private ScheduledFuture<?> pending;
+                    private long generation;
+                    void schedule(long stamp,int seconds) {
+                        if(scheduler.isShutdown())return;
+                        pending=scheduler.schedule(()->{
+                            synchronized(controller) {
+                                if(stamp!=generation || scheduler.isShutdown())return;
+                                controller.tick();publish(snapshot,controller);
+                                schedule(stamp,controller.observationDelaySeconds());
+                            }
+                        },seconds,TimeUnit.SECONDS);
+                    }
+                    void wake(){if(pending!=null)pending.cancel(false);schedule(++generation,0);}
+                }
+                Observer observer=new Observer();
+                synchronized(controller){observer.wake();}
                 try {
                     while(true) {
                         try(LocalSocket socket=server.accept()) {
@@ -66,9 +84,12 @@ public final class Main {
                                 Map<String,Object> input=Json.object(request.get("input"));
                                 synchronized(controller) {
                                     // A second WebUI must not see the pre-operation state as confirmed.
-                                    if(!action.equals("status") && !action.equals("pairing-code"))snapshot.invalidate();
+                                    if(!Controller.readOnly(action))snapshot.invalidate();
                                     try{response=Json.map("ok",true,"data",controller.handle(action,input));}
-                                    finally{publish(snapshot,controller);}
+                                    finally{
+                                        publish(snapshot,controller);
+                                        if(!Controller.readOnly(action))observer.wake();
+                                    }
                                 }
                             }catch(Exception e) {response=Json.map("ok",false,"error",safeError(e));}
                             writeLine(socket.getOutputStream(),Json.stringify(response));
@@ -92,10 +113,15 @@ public final class Main {
     }
     private static void restoreAdb(Path state)throws Exception {
         if(!state.toAbsolutePath().normalize().equals(Paths.get("/data/adb/usblink")))throw new IOException("恢复目录无效");
-        if(!Files.exists(state.resolve("adbd-tcp.json")))return;
+        if(!Files.exists(state.resolve("adbd-tcp.json")) && !Files.exists(state.resolve("adb-root-recovery.json")))return;
         try(FileChannel file=FileChannel.open(state.resolve("daemon.lock"),StandardOpenOption.CREATE,StandardOpenOption.WRITE)) {
             FileLock lock=file.tryLock();if(lock==null)throw new IOException("控制服务尚未退出，暂不恢复调试配置");
-            try{new AndroidPlatform(state).stopTcp();}finally{lock.release();}
+            try{
+                AndroidPlatform platform=new AndroidPlatform(state);IOException failure=null;
+                try{platform.restoreAdbRoot();}catch(IOException e){failure=e;}
+                try{platform.stopTcp();}catch(IOException e){if(failure==null)failure=e;}
+                if(failure!=null)throw failure;
+            }finally{lock.release();}
         }
     }
     private static void client(String action,String encoded) throws Exception {
@@ -105,7 +131,7 @@ public final class Main {
         catch(IllegalArgumentException e) {throw new IOException("请求数据无效");}
         try(LocalSocket socket=new LocalSocket()) {
             try {socket.connect(new LocalSocketAddress(SOCKET,LocalSocketAddress.Namespace.ABSTRACT));}
-            catch(IOException e) {throw new IOException("模块控制服务未运行，请在 APatch 模块页点击操作启动");}
+            catch(IOException e) {throw new IOException("模块控制服务未运行，请在 Root 管理器的模块页点击操作启动；首次安装请按管理器提示重启");}
             if(socket.getPeerCredentials().getUid()!=0)throw new IOException("控制服务身份无效，已拒绝发送配对信息");
             socket.setSoTimeout(25000);
             writeLine(socket.getOutputStream(),Json.stringify(Json.map("action",action,"input",input)));

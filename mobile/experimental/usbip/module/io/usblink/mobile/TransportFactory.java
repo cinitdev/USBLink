@@ -4,4 +4,5 @@ package io.usblink.mobile;
 final class TransportFactory {
     static final boolean USB=true;
     static SharingTransport create(Platform platform){return new UsbTransport(platform);}
+    static SharingTransport create(Platform platform,AdbHistory history){return new UsbTransport(platform,history);}
 }

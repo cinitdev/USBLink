@@ -1,10 +1,11 @@
 export function isStatus(value) {
   return !!value?.sharing && !!value?.mesh && !!value?.debug;
 }
+export function isHistory(value) { return Array.isArray(value?.entries) && typeof value?.epoch === 'string' && typeof value?.hasMore === 'boolean'; }
 
 export function pollDelay(status, failures = 0) {
   if (failures) return Math.min(15000, 2000 * 2 ** Math.min(failures - 1, 3));
-  return status?.sharing?.enabled || ['starting', 'waiting_network'].includes(status?.sharing?.state) || (status?.mesh?.configured && !status.mesh.running) ? 2000 : 5000;
+  return status?.adbRoot?.state === 'changing' || status?.sharing?.enabled || ['starting', 'waiting_system', 'waiting_network'].includes(status?.sharing?.state) || (status?.mesh?.configured && !status.mesh.running && !status.mesh.paused) ? 2000 : 5000;
 }
 
 // One read-only loop, also used after WebView resume. Generation fencing prevents
@@ -60,7 +61,7 @@ export function createRequestFlow(request, { onStatus, onReadError, onPending, o
         await beforeAction();
         if (disposed) return null;
         const result = await request(action, payload);
-        if (action !== 'pairing-code' && !isStatus(result)) throw new Error('操作已提交，但状态无法确认。请刷新后检查。');
+        if (action === 'history' ? !isHistory(result) : action !== 'pairing-code' && !isStatus(result)) throw new Error('操作已提交，但状态无法确认。请刷新后检查。');
         if (!disposed && isStatus(result)) onStatus(result);
         return disposed ? null : result;
       } catch (error) { failed = true; if (!disposed) onActionError(error); return null; }

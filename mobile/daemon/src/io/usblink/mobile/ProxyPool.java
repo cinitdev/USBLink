@@ -21,6 +21,10 @@ import java.util.concurrent.atomic.AtomicLong;
 
 /** Opaque TCP transport: Android RSA authentication remains between desktop adb and system adbd. */
 public final class ProxyPool implements SharingTransport {
+    private final AdbHistory history;
+    public ProxyPool(){this(null);}
+    public ProxyPool(AdbHistory history){this.history=history;}
+    public AdbHistory history(){return history;}
     private final Map<String,Listener> listeners = new HashMap<>();
     private final Map<String,Session> sessions = new HashMap<>();
     private final ThreadPoolExecutor workers = new ThreadPoolExecutor(0, 24, 30, TimeUnit.SECONDS,
@@ -109,7 +113,10 @@ public final class ProxyPool implements SharingTransport {
         try {
             InputStream input = from.getInputStream(); OutputStream output = to.getOutputStream();
             byte[] buffer = new byte[65536]; int count;
-            while ((count = input.read(buffer)) != -1) { output.write(buffer, 0, count); session.bytes.addAndGet(count); }
+            while ((count = input.read(buffer)) != -1) {
+                output.write(buffer, 0, count); session.bytes.addAndGet(count);
+                if(from==session.client && session.observer!=null)session.observer.accept(buffer,0,count);
+            }
             // Preserve the response after a peer half-closes its sending side (including large transfers).
             to.shutdownOutput();
             if (session.finished.incrementAndGet() == 2) session.close();
@@ -125,7 +132,8 @@ public final class ProxyPool implements SharingTransport {
         final String id = UUID.randomUUID().toString(); final String kind;
         final Socket client,target = new Socket(); final long startedAt=System.currentTimeMillis();
         final AtomicInteger finished=new AtomicInteger(); final AtomicLong bytes=new AtomicLong();
-        Session(String kind,Socket client) { this.kind=kind;this.client=client; }
+        final AdbCommandObserver observer;
+        Session(String kind,Socket client) { this.kind=kind;this.client=client;observer=history==null?null:history.parser(client.getInetAddress().getHostAddress()); }
         void close() { synchronized(ProxyPool.this) { closeQuietly(client); closeQuietly(target); sessions.remove(id); } }
     }
 }

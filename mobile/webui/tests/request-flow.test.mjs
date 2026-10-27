@@ -70,6 +70,19 @@ test('pairing-code response is not cached as status or followed by a redundant r
   assert.deepEqual(calls, ['pairing-code']); assert.deepEqual(h.updates, []);
 });
 
+test('history page is not mistaken for live service status and clear fences old polling', async () => {
+  const page = { entries: [], epoch: 'example', hasMore: false };
+  const h = harness(async () => page);
+  assert.deepEqual(await h.flow.run('history', { before: 2, epoch: 'example' }), page);
+  assert.deepEqual(h.updates, []); assert.deepEqual(h.errors, []);
+  const pending = deferred();
+  const cleared = { ...state(true), history: { ...page, count: 0 } };
+  const c = harness(async action => action === 'status' ? pending.promise : cleared);
+  const oldRead = c.flow.read(); await c.flow.run('clear-history');
+  pending.resolve({ ...state(true), history: { ...page, count: 20 } }); await oldRead;
+  assert.deepEqual(c.updates, [cleared], 'An older status cannot resurrect cleared history');
+});
+
 test('unconfirmed responses stay errors and disposed views ignore late completions', async () => {
   const h = harness(async action => action === 'status' ? state(false) : {});
   assert.equal(await h.flow.run('set-sharing', { enabled: true }), null);
@@ -80,10 +93,13 @@ test('unconfirmed responses stay errors and disposed views ignore late completio
 });
 
 test('stable pages poll less often, transitions stay responsive and failures back off', () => {
+  assert.equal(pollDelay({ ...state(false), adbRoot: { state: 'changing' } }), 2000);
   assert.equal(pollDelay(state(false)), 5000);
   assert.equal(pollDelay(state(true)), 2000);
   assert.equal(pollDelay({ sharing: { state: 'starting' }, mesh: {} }), 2000);
   assert.equal(pollDelay({ sharing: {}, mesh: { configured: true, running: false } }), 2000);
+  assert.equal(pollDelay({ sharing: { enabled: false, state: 'off' }, mesh: { configured: true, running: false, paused: true } }), 5000, 'Saved disconnected network is idle, not still connecting');
+  assert.equal(pollDelay({ sharing: { enabled: true, state: 'waiting_system' }, mesh: { paused: true } }), 2000);
   assert.equal(pollDelay(state(false), 1), 2000);
   assert.equal(pollDelay(state(false), 20), 15000);
 });

@@ -4,4 +4,5 @@ package io.usblink.mobile;
 final class TransportFactory {
     static final boolean USB=false;
     static SharingTransport create(Platform platform){return new ProxyPool();}
+    static SharingTransport create(Platform platform,AdbHistory history){return new ProxyPool(history);}
 }

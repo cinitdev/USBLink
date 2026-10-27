@@ -160,6 +160,13 @@ check grep -Fxq -- "$STATE" "$FIXTURE/restore.log"
 : > "$FIXTURE/restore-failure"
 check no restore_adb
 check test -f "$STATE/adbd-tcp.json"
+rm -f "$STATE/adbd-tcp.json" "$FIXTURE/restore-failure" "$FIXTURE/restore.log"
+: > "$STATE/adb-root-recovery.json"
+check restore_adb
+check grep -Fxq -- 'restore-adb' "$FIXTURE/restore.log"
+: > "$FIXTURE/restore-failure"
+check no restore_adb
+check test -f "$STATE/adb-root-recovery.json"
 
 mkdir -p "$FIXTURE/proc/sys/kernel/random"
 printf '%s\n' '11111111-1111-1111-1111-111111111111' > "$FIXTURE/proc/sys/kernel/random/boot_id"
@@ -195,6 +202,22 @@ check no read_status
 rm -f "$STATE/stopping"
 printf '%s\n' '42 123 invalid incomplete' > "$STATE/status.snapshot"
 check no read_status
+
+# Corrupt records may be archived only after proving there is no module worker.
+printf '\0\0\0\0' > "$STATE/daemon.pid"
+printf '\0\0\0\0' > "$STATE/mesh.pid"
+printf 'keep-pairing' > "$STATE/mesh.json"
+printf 'keep-recovery' > "$STATE/adbd-tcp.json"
+check no recover_runtime_records
+check test -f "$STATE/daemon.pid"
+make_proc 42 123 /system/bin/app_process64 another-app
+check recover_runtime_records
+check test ! -f "$STATE/daemon.pid"
+check test ! -f "$STATE/mesh.pid"
+check test ! -f "$STATE/status.snapshot"
+check test "$(cat "$STATE/mesh.json")" = keep-pairing
+check test "$(cat "$STATE/adbd-tcp.json")" = keep-recovery
+check test "$(find "$STATE" -path '*/recovery-*/daemon.pid' | wc -l)" -eq 1
 
 exec 8>&-
 exec 9>&-

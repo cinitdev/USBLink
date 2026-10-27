@@ -5,7 +5,7 @@ MODDIR=$1
 mkdir -p "$STATE" || exit 1
 chmod 0700 "$STATE" || exit 1
 startup_error() { printf '%s\n' "$1" > "$STATE/startup.error"; echo "$1" >&2; }
-find_flock || { startup_error '管理器缺少 BusyBox flock，请更新 APatch / KernelSU。'; exit 1; }
+find_flock || { startup_error '管理器缺少 BusyBox flock，请更新 Magisk / APatch / KernelSU。'; exit 1; }
 # Do not unlink these lock files: the kernel releases the locks even after SIGKILL/reboot.
 # The short control lock serializes start/stop; the lifetime lock excludes other supervisors.
 exec 8>"$STATE/control.flock" || exit 1
@@ -15,6 +15,7 @@ exec 9>"$STATE/supervisor.flock" || exit 1
 "$BUSYBOX" flock -n 9 9>&9 || exit 0
 LOCK=$STATE/supervisor.lock
 mkdir -p "$LOCK" || exit 1
+recover_runtime_records || { startup_error '后台运行记录损坏，尚不能安全恢复；请检查残留进程。'; exit 1; }
 # A supervisor from the old mkdir-lock implementation must not be disturbed.
 owned_record "$LOCK/pid" supervisor && exit 0
 write_record "$LOCK/pid" $$ || { startup_error '无法保存守护进程状态，启动已取消。'; exit 1; }
@@ -61,7 +62,7 @@ while [ -d "$MODDIR" ] && [ ! -f "$MODDIR/disable" ] && [ ! -f "$MODDIR/remove" 
     if [ ! -d "$MODDIR" ] || [ -f "$MODDIR/disable" ] || [ -f "$MODDIR/remove" ] || [ -f "$STATE/stopping" ]; then finish; exit $?; fi
     sleep 2 9>&-
     uptime=$((uptime+2))
-    if [ -f "$STATE/daemon.log" ] && [ "$(wc -c < "$STATE/daemon.log")" -gt 65536 ]; then : > "$STATE/daemon.log"; fi
+    if [ "$((uptime % 30))" -eq 0 ] && [ -f "$STATE/daemon.log" ] && [ "$(wc -c < "$STATE/daemon.log")" -gt 65536 ]; then : > "$STATE/daemon.log"; fi
   done
   wait "$child" 2>/dev/null
   child=
