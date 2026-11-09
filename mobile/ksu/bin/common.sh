@@ -213,7 +213,7 @@ clear_rpc_rule() {
 }
 
 restore_adb() {
-  [ -f "$STATE/adbd-tcp.json" ] || [ -f "$STATE/adb-root-recovery.json" ] || return 0
+  [ -f "$STATE/adbd-tcp.json" ] || return 0
   CLASSPATH="$MODDIR/lib/usblink-daemon.jar" /system/bin/app_process / --nice-name=usblink-restore io.usblink.mobile.Main restore-adb "$STATE" 8>&- 9>&-
 }
 

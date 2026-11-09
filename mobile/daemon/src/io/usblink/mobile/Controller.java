@@ -63,7 +63,6 @@ public final class Controller implements Closeable {
         boolean restoring=false;
         try {
             if(!recovered){restoring=true;platform.recoverTcp();recovered=true;restoring=false;}
-            platform.tickAdbRoot(this::revokeForRoot);
             if(blocked)return;
             if(!enabled) {
                 restoring=true;if(!offClean)stopSharingAndNetwork();
@@ -71,8 +70,6 @@ public final class Controller implements Closeable {
             }
             if(storeProblem!=null){fail(storeProblem);return;}
             mesh.setEnabled(true);
-            if(platform.adbRootChanging()){state="starting";problem="正在切换 adbd 权限，请等待确认后在电脑手动连接";return;}
-            if(!platform.adbRootAllowsSharing()){proxy.stopAll("adbd_unavailable");connectPort=0;state="error";problem="尚未确认 adbd 已退出 Root，共享已暂停；请检查 ADB Root 设置";return;}
             if(startAttempted)connectPort=platform.maintainTcpPort();
             String ip=mesh.localIp();
             // A network outage revokes the proxy but does not repeatedly restart system adbd.
@@ -83,11 +80,13 @@ public final class Controller implements Closeable {
                 startAttempted=true;platform.startTcp();connectPort=platform.tcpPort();
             }
             if(connectPort==0){proxy.stopAll("adbd_unavailable");state="starting";problem="正在等待系统调试服务监听";return;}
+            proxy.presenceKey(mesh.presenceKey());
             proxy.configure("adb",ip,listenPort,connectPort);state="sharing";problem=null;
         }catch(IOException e){if(restoring)block(e.getMessage());else fail(e.getMessage());}
     }
     private void changeSharing(boolean next)throws IOException {
         if(next && blocked)throw new IOException("上次共享未完成，请先关闭共享，确认恢复后再开启");
+        if(next)platform.requireUsbDebugging();
         offClean=false;
         if(!next){enabled=false;blocked=false;presence.stop();proxy.stopAll();connectPort=0;}
         try{store.save(next);storeProblem=null;enabled=next;}
@@ -103,15 +102,9 @@ public final class Controller implements Closeable {
         return action.equals("pairing-code") || action.equals("history")?result:status();
     }
     static boolean readOnly(String action){return action.equals("status") || action.equals("pairing-code") || action.equals("history");}
-    private void revokeForRoot(){presence.phase(PresenceServer.PREPARING+(proxy.usb()?4:0));proxy.stopAll("adb_root_changed");connectPort=0;}
     private Map<String,Object> perform(String action,Map<String,Object> input)throws IOException {
         switch(action) {
             case "status":return status();
-            case "set-adb-root":
-                if(!(input.get("enabled") instanceof Boolean))throw new IllegalArgumentException("ADB Root 开关值无效");
-                try{platform.setAdbRoot((Boolean)input.get("enabled"),this::revokeForRoot);}
-                finally{reconcile();}
-                return status();
             case "history":
                 if(proxy.history()==null)throw new IOException("当前模块不支持历史记录");
                 return proxy.history().page(input);
@@ -137,16 +130,15 @@ public final class Controller implements Closeable {
     }
     public synchronized Map<String,Object> status()throws IOException {
         boolean active=enabled && proxy.active("adb");
-        return Json.map("version",proxy.usb()?"0.3.12-experimental":"0.2.8","device",platform.device(),"adbRoot",platform.adbRootStatus(),
+        return Json.map("version",proxy.usb()?"0.3.25":"0.2.15","device",platform.device(),
             "sharing",Json.map("enabled",enabled,"active",active,"state",state,"problem",problem),
             "debug",Json.map("mode",proxy.usb()?"usb-adb-experimental":"system-tcp","enabled",connectPort>0,"connectAddress",active?mesh.localIp()+":"+proxy.boundPort("adb"):null),
             "appSession",Json.map("ready",presence.active(),"problem",presenceProblem),
             "mesh",mesh.status(),"sessions",proxy.snapshot(),"lastDisconnect",proxy.lastDisconnect(),"history",proxy.history()==null?null:proxy.history().page(0),"settings",Json.map("relay",mesh.relay()),"features",Json.map("externalUsb",false));
     }
-    synchronized int observationDelaySeconds(){return !enabled && offClean && state.equals("off") && !platform.adbRootChanging()?5:2;}
+    synchronized int observationDelaySeconds(){return !enabled && offClean && state.equals("off")?5:2;}
     @Override public synchronized void close() {
         if(closed)return;closed=true;presence.close();proxy.close();
-        try{platform.restoreAdbRoot();}catch(IOException e){problem=e.getMessage();}
         try{platform.stopTcp();}catch(IOException e){problem=e.getMessage();}finally{mesh.stop();}
         // The supervisor separately verifies recovery after this process has exited.
     }

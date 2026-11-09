@@ -114,8 +114,11 @@ public final class ProxyPool implements SharingTransport {
             InputStream input = from.getInputStream(); OutputStream output = to.getOutputStream();
             byte[] buffer = new byte[65536]; int count;
             while ((count = input.read(buffer)) != -1) {
+                if(session.observer!=null) {
+                    if(from==session.client)session.observer.accept(buffer,0,count);
+                    else session.observer.returned(buffer,0,count);
+                }
                 output.write(buffer, 0, count); session.bytes.addAndGet(count);
-                if(from==session.client && session.observer!=null)session.observer.accept(buffer,0,count);
             }
             // Preserve the response after a peer half-closes its sending side (including large transfers).
             to.shutdownOutput();
@@ -134,6 +137,6 @@ public final class ProxyPool implements SharingTransport {
         final AtomicInteger finished=new AtomicInteger(); final AtomicLong bytes=new AtomicLong();
         final AdbCommandObserver observer;
         Session(String kind,Socket client) { this.kind=kind;this.client=client;observer=history==null?null:history.parser(client.getInetAddress().getHostAddress()); }
-        void close() { synchronized(ProxyPool.this) { closeQuietly(client); closeQuietly(target); sessions.remove(id); } }
+        void close() { synchronized(ProxyPool.this) { closeQuietly(client); closeQuietly(target); sessions.remove(id); } if(observer!=null)observer.close(); }
     }
 }

@@ -28,6 +28,7 @@ public final class SharingStartupTestMain {
         system.unavailable=true;check(gate.pending()==null,"Startup gate is one-time; runtime protection is checked separately");
     }
     static final class Phone implements Platform {
+        public void requireUsbDebugging(){}
         final SystemState system=new SystemState();final SharingStartup gate=new SharingStartup(system);
         int starts,stops,maintenance;boolean protectedPort=true;
         public Map<String,Object> device(){return Json.map("model","Test Phone");}

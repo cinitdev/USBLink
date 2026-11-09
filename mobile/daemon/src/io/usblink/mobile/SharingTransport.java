@@ -19,4 +19,5 @@ public interface SharingTransport extends Closeable {
     default Map<String,Object> export(){return null;}
     default Map<String,Object> lastDisconnect(){return null;}
     default AdbHistory history(){return null;}
+    default void presenceKey(byte[] key){}
 }

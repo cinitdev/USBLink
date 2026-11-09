@@ -1,8 +1,12 @@
 # USBLink Mobile
 
-面向 Android 12 及以上（API 31+）、ARM64 的 Root 手机模块，同一 ZIP 支持 Magisk、APatch 和 KernelSU。Magisk 用户通过独立 KsuWebUI 应用打开界面；APatch／KernelSU 可使用管理器内置 WebUI。作者：一只小柒夏。已有真机目标是 Redmi K40 + Android 12 + APatch；Magisk／KernelSU 尚未完成真机验收。后端为 DEX JAR + app_process，没有独立 USBLink APK。
+当前本地 USB ADB 构建为 **0.3.25**：修复共享／网络启动时 WebUI 切页卡顿，支持的宿主改用原生后台调用，历史输出按需展开并减少重复渲染。历史保留最近 **1000 条**，默认每页显示 **100 条**，包含与请求对应的手机返回文本、标准错误、可用退出码及文件操作协议结果；每条返回合计最多 **4096 字节**，超出标注截断，可搜索返回内容。升级保留最新旧记录，但不补造旧输出。手机端无法看到的电脑路径或原始调用参数仍明确说明。保留配合 Windows **0.3.19** 识别并释放更新后旧会话的修复，以及 USB 调试检测、WebUI 控制 Shell Root 检测、首次点击共享修复；adbd Root 运行模式仍已删除。默认 TCP 开发源码为 0.2.15，本次交付 USB ADB ZIP，无需更新电脑。验证边界见 [WebUI 响应验证](docs/webui-response-0.3.24-validation.md)。
 
-**独立的 USB ADB 实验模块 0.3.12（随 v0.3.12 正式发布）**：电脑可在 USBLink 0.3.11 或更新版本点击连接，现有 ADB 经虚拟 USB 接口发现手机。保留 ADB Root 开关、请求历史、传输修复、断网省电、市场名称、蓝白 WebUI 和静默自动同步。见 [实验模块说明](experimental/usbip/MODULE.md)。它不支持 MTP / OTG。
+从旧版升级后请重启手机一次，让旧进程和临时挂载退出；配对、共享偏好和历史保留。旧 Root 配置文件不再读取。日常共享启停仍无需重启手机。下方版本条目是历史记录，不代表已移除功能仍可使用。
+
+面向 Android 12 及以上（API 31+）、ARM64 的 Root 手机模块，同一 ZIP 支持 Magisk、APatch 和 KernelSU。Magisk 用户通过独立 KsuWebUI 应用打开界面；APatch／KernelSU 可使用管理器内置 WebUI。作者：一只小柒夏。用户反馈骁龙和天玑设备均已测试可用；已记录的开发真机环境为 Redmi K40 + Android 12 + APatch，各 ROM／管理器组合仍以实测为准。后端为 DEX JAR + app_process，没有独立 USBLink APK。
+
+**独立的 USB ADB 实验模块 0.3.12（随 v0.3.12 正式发布）**：电脑可在 USBLink 0.3.11 或更新版本点击连接，现有 ADB 经虚拟 USB 接口发现手机。保留请求历史、传输修复、断网省电、市场名称、蓝白 WebUI 和静默自动同步。见 [模块说明](experimental/usbip/MODULE.md)。它不支持 MTP / OTG。
 
 ## 0.3.12：损坏运行记录的启动恢复
 
@@ -26,15 +30,11 @@
 - 后台使用对应管理器自带的 BusyBox，Magisk 新增 `/data/adb/magisk/busybox` 路径；找不到 `flock` 时仍拒绝无锁启动。关闭界面不会停止共享服务，模块禁用／卸载仍执行原清理流程。
 - KsuWebUI 复用现有 `ksu.exec` 回调接口；不自动下载 APK、不创建网络 Root 控制入口、不绕过 Root 授权。默认 TCP 开发构建同步为 0.2.6。
 
-版本 0.3.9 的管理器兼容性经过源码核对、安装／运行路径夹具测试和主机构建，尚未刷入 Magisk／KernelSU 真机。Root 管理器兼容不代表所有 ROM 支持 adbd Root，详见 [验证记录](docs/root-managers-0.3.9-validation.md)。
+版本 0.3.9 的管理器兼容性经过源码核对、安装／运行路径夹具测试和主机构建，尚未刷入 Magisk／KernelSU 真机。验证边界详见 [验证记录](docs/root-managers-0.3.9-validation.md)。
 
-## 0.3.8：ADB Root 权限开关
+## 0.3.8：已移除的历史功能
 
-手机 WebUI“设置 → ADB 权限”新增默认开启、持久保存的 Root 偏好。系统启动完成、adbd 就绪后应用；开机期间可先关闭取消启用。运行中启停不需要重启手机，但会重启系统 adbd、中断 USB 与远程调试，电脑需手动重新连接。实际权限按系统 adbd 的进程身份与 UID 校验，切换未确认时显示等待／错误，失败不在当前进程内自动重复重启。
-
-仅使用 ROM 已支持的 `service.adb.root` 能力。APatch / KernelSU 能让模块以 Root 运行，不能证明量产版 adbd 支持 Root；不支持时显示原因，普通权限共享仍可使用。未确认降为普通 UID 2000 时暂停远程共享。保持 RSA、SELinux、系统 adbd 二进制及 USB 调试开关原样。
-
-Root 偏好与共享／组网独立，切换 Root 不会启动已关闭的共享或网络。停止模块尝试恢复原临时属性和权限，外部冲突不覆盖，失败保留恢复记录。默认 TCP 开发构建同步至 0.2.5。此次没有在真实手机修改权限或安装模块；见 [ADB Root 验证说明](docs/adb-root-0.3.8-validation.md)。
+旧版曾提供 adbd Root 开关，0.3.18 已完整移除。旧版验证记录仅供回溯：[历史记录](docs/adb-root-0.3.8-validation.md)。
 
 ## 0.3.7：远程 ADB 请求历史
 
@@ -58,7 +58,7 @@ Root 偏好与共享／组网独立，切换 Root 不会启动已关闭的共享
 
 ## 当前发布：USB ADB 实验模块 0.3.12
 
-下载：[Windows 0.3.12 + Mobile 0.3.12 正式发布版](https://github.com/cinitdev/USBLink/releases/tag/v0.3.12)。手机安装 `USBLink-Mobile-0.3.12-usb-adb-experimental-arm64.zip`，电脑安装 `USBLink-0.3.12-x64-Setup.exe`。Windows 0.3.11 仍兼容；新的可搜索多设备列表需更新电脑版。正式发布渠道不改变手机 USB ADB 功能的实验范围。
+下载：[Windows 0.3.12 + Mobile 0.3.12 正式发布版](https://github.com/cinitdev/USBLink/releases/tag/v0.3.12)。手机安装 `USBLink-Mobile-0.3.12-usb-adb-experimental-arm64.zip`，电脑安装 `USBLink-0.3.12-x64-Setup.exe`。Windows 0.3.11 仍兼容；新的可搜索多设备列表需更新电脑版。此处保留 0.3.12 的历史发布文件名；0.3.25 起使用不带实验后缀的新名称。
 
 1. 在 Magisk／APatch／KernelSU 模块页覆盖安装 ZIP，按管理器提示完成更新或重启。同一 USB 实验通道的组网配置和共享开关会保留；从旧 TCP 模块升级时不会自动开启新 USB 通道。
 2. 手机开发者选项开启普通 **USB 调试**，不需要无线调试，也不要求手机接到另一台电脑上。
@@ -69,7 +69,7 @@ Root 偏好与共享／组网独立，切换 Root 不会启动已关闭的共享
 
 模块显示手机系统提供的市场名称，再回退设备名称或原型号，不使用机型表。WebUI 使用蓝白／藏蓝配色，后台静默同步状态，保留正在编辑的表单；从后台返回立即读取新状态。
 
-此版本只有 Android ADB Interface，**没有 MTP 便携存储、Fastboot、外接 U 盘或外接手机共享**。独立试验已在 Redmi K40／Android 12／APatch 验证驱动、认证、64 MiB 双向传输和清理；用户反馈早期整合模块可用。最新重启修复通过自动回归，尚未完成新版刷入后的重启、Android Studio 安装 APK 和多品牌真机验收。天玑等 ARM64 设备具备架构基础，ROM 和 Root 兼容性仍需实测。细节见 [模块说明](experimental/usbip/MODULE.md) 与 [重启修复验证记录](docs/reboot-sharing-0.3.2-validation.md)。
+此版本只有 Android ADB Interface，**没有 MTP 便携存储、Fastboot、外接 U 盘或外接手机共享**。独立试验已在 Redmi K40／Android 12／APatch 验证驱动、认证、64 MiB 双向传输和清理；用户反馈早期整合模块可用。最新重启修复通过自动回归，尚未完成新版刷入后的重启、Android Studio 安装 APK 和多品牌真机验收。以上为早期版本验证记录。用户于 2026-11-09 反馈已在骁龙和天玑手机上测试可用，当前模块不再使用实验标识。细节见 [模块说明](experimental/usbip/MODULE.md) 与 [重启修复验证记录](docs/reboot-sharing-0.3.2-validation.md)。
 
 ## 旧 TCP 模块（开发兼容路径）
 
@@ -114,10 +114,10 @@ Root 偏好与共享／组网独立，切换 Root 不会启动已关闭的共享
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File mobile/scripts/fetch-easytier.ps1
-powershell -NoProfile -ExecutionPolicy Bypass -File mobile/scripts/build.ps1 -ExperimentalUsb
+powershell -NoProfile -ExecutionPolicy Bypass -File mobile/scripts/build.ps1 -UsbAdb
 ```
 
-构建产物：`release/USBLink-Mobile-0.3.12-usb-adb-experimental-arm64.zip`，同目录生成 SHA256 文件。构建会执行管理器安装／BusyBox 发现、核心、组网、网络观察故障、名称、认证、TCP 恢复/防护、重启准备、ADB 历史、ADB Root、USB/IP 协议、模块集成和 WebUI 测试，然后编译 DEX 与网页。不带 `-ExperimentalUsb` 时生成 TCP 0.2.8 模块，默认构建不混入实验 USB 实现或标识。
+构建产物：`release/USBLink-Mobile-0.3.25-usb-adb-arm64.zip`，同目录生成 SHA256 文件。构建会执行管理器安装／BusyBox 发现、核心、组网、网络观察故障、名称、认证、TCP 恢复/防护、重启准备、ADB 历史及返回解析、USB/IP 协议、模块集成、桌面进程交接和 WebUI 测试，然后编译 DEX 与网页。不带 `-UsbAdb` 时生成 TCP 0.2.15 模块；旧参数 `-ExperimentalUsb` 作为别名兼容。
 
 安装 Git Bash 后可运行脚本模拟测试：
 

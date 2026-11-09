@@ -113,14 +113,11 @@ public final class Main {
     }
     private static void restoreAdb(Path state)throws Exception {
         if(!state.toAbsolutePath().normalize().equals(Paths.get("/data/adb/usblink")))throw new IOException("恢复目录无效");
-        if(!Files.exists(state.resolve("adbd-tcp.json")) && !Files.exists(state.resolve("adb-root-recovery.json")))return;
+        if(!Files.exists(state.resolve("adbd-tcp.json")))return;
         try(FileChannel file=FileChannel.open(state.resolve("daemon.lock"),StandardOpenOption.CREATE,StandardOpenOption.WRITE)) {
             FileLock lock=file.tryLock();if(lock==null)throw new IOException("控制服务尚未退出，暂不恢复调试配置");
             try{
-                AndroidPlatform platform=new AndroidPlatform(state);IOException failure=null;
-                try{platform.restoreAdbRoot();}catch(IOException e){failure=e;}
-                try{platform.stopTcp();}catch(IOException e){if(failure==null)failure=e;}
-                if(failure!=null)throw failure;
+                new AndroidPlatform(state).stopTcp();
             }finally{lock.release();}
         }
     }

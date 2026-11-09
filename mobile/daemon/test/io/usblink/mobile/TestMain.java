@@ -18,7 +18,7 @@ import java.util.function.BooleanSupplier;
 public final class TestMain {
     private static int checks;
     public static void main(String[] args) throws Exception {
-        jsonProtocol(); largeTransferAndHalfClose(); revokeSessions(); failedConnectCleanup(); sharingLifecycle(); networkPowerLifecycle(); corruptedStore(); legacyPreference(); statusSnapshot();
+        jsonProtocol(); largeTransferAndHalfClose(); revokeSessions(); failedConnectCleanup(); sharingLifecycle(); networkPowerLifecycle(); corruptedStore(); legacyPreference(); statusSnapshot(); adbdIdentity(); retiredPrivilegeControl();
         System.out.println("PASS: " + checks + " mobile backend checks");
     }
     private static void check(boolean yes,String message) {checks++;if(!yes)throw new AssertionError(message);}
@@ -189,11 +189,34 @@ public final class TestMain {
         check(!Files.exists(file),"Orderly exit removes shared UI status");
         snapshot.publish(Json.map());check(!Files.exists(file),"Late scheduled publication cannot resurrect status after close");
     }
+    private static void adbdIdentity() {
+        String stat="42 (adbd) S "+"0 ".repeat(18)+"123";
+        check(AdbdIdentity.matches("42","Uid:\t2000\t2000\t2000\t2000\n",stat,"u:r:adbd:s0"),"Ordinary system adbd can own the private listener");
+        for(String domain:Arrays.asList("adbd","su","magisk","ksu","vendor_root"))check(AdbdIdentity.matches("42","Uid:\t0\t0\t0\t0\n",stat,"u:r:"+domain+":s0"),"External system adbd remains recognizable in "+domain);
+        check(!AdbdIdentity.matches("42","Uid:\t0\t2000\t0\t0\n",stat,"u:r:adbd:s0"),"Mixed UID rejected");
+        check(!AdbdIdentity.matches("42","Uid:\t0\t0\t0\t0\n",stat,"u:r:untrusted_app:s0"),"App domain rejected");
+        check(!AdbdIdentity.matches("42","Uid:\t0\t0\t0\t0\n",stat.replace(") S", ") Z"),"u:r:adbd:s0"),"Zombie rejected");
+    }
+    private static void retiredPrivilegeControl()throws Exception {
+        Path dir=Files.createTempDirectory("usblink-retired-feature-test-");
+        // Old files may remain after an upgrade, including a failed transition.
+        for(String name:Arrays.asList("adb-root-preference.json","adb-root-recovery.json"))Files.writeString(dir.resolve(name),"obsolete or malformed");
+        FakeMesh mesh=new FakeMesh();mesh.ip="127.0.0.1";FakePlatform phone=new FakePlatform();phone.port=32123;
+        try(ProxyPool proxy=new ProxyPool();Controller c=new Controller(phone,mesh,new SharingStore(dir),proxy,0)) {
+            c.tick();c.handle("set-sharing",Json.map("enabled",true));c.tick();
+            check(proxy.active("adb") && state(c).equals("sharing"),"Retired privilege records cannot block ordinary sharing");
+            check(!c.status().containsKey("adbRoot"),"Status exposes no retired privilege control");
+            int starts=phone.starts,stops=phone.stops;
+            for(boolean next:new boolean[]{true,false})expectFailure(()->c.handle("set-adb-root",Json.map("enabled",next)),"Old clients cannot change adbd privileges");
+            check(proxy.active("adb") && phone.starts==starts && phone.stops==stops,"Rejected old commands do not stop sharing or restart adbd");
+        }
+    }
     private static boolean enabled(Controller c)throws IOException{return (Boolean)Json.object(c.status().get("sharing")).get("enabled");}
     private static String state(Controller c)throws IOException{return (String)Json.object(c.status().get("sharing")).get("state");}
     interface Throwing {void run()throws Exception;}
     static final class FakePlatform implements Platform {
-        int port,starts,stops;boolean settingsOpened,failure,restoreFailure;
+        int port,starts,stops;boolean settingsOpened,failure,restoreFailure;Boolean usbDebugging=true;
+        public void requireUsbDebugging()throws IOException{if(!Boolean.TRUE.equals(usbDebugging))throw new IOException(usbDebugging==null?"USB 调试状态未知":"请先开启 USB 调试");}
         public Map<String,Object> device(){return Json.map("model","Test Phone","androidVersion","12","sdk",31,"root",true);}
         public void recoverTcp()throws IOException{stopTcp();}
         public void startTcp(){starts++;}

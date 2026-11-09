@@ -2,6 +2,17 @@
 MODDIR=${0%/bin/usblinkctl}
 case "$1" in ''|*[!a-z-]*) echo '{"ok":false,"error":"无效操作"}'; exit 1;; esac
 case "${2:-e30=}" in *[!A-Za-z0-9+/=]*) echo '{"ok":false,"error":"无效请求"}'; exit 1;; esac
+# Read the WebUI control shell itself, not the daemon or remote adb shell.
+# This path is local-only and never changes Android settings or Root grants.
+if [ "$1" = environment ]; then
+  SHELL_UID=$(/system/bin/id -u 2>/dev/null)
+  case "$SHELL_UID" in ''|*[!0-9]*) SHELL_UID=null;; esac
+  USB_DEBUG=$(/system/bin/toybox timeout 3 /system/bin/settings get global adb_enabled 2>/dev/null)
+  if [ "$?" -ne 0 ]; then USB_DEBUG=null; fi
+  case "$USB_DEBUG" in 1) USB_DEBUG=true;; 0) USB_DEBUG=false;; *) USB_DEBUG=null;; esac
+  printf '{"ok":true,"data":{"usbDebugging":%s,"shellUid":%s}}\n' "$USB_DEBUG" "$SHELL_UID"
+  exit 0
+fi
 if [ "$1" = status ]; then
   . "$MODDIR/bin/common.sh"
   read_status && exit 0

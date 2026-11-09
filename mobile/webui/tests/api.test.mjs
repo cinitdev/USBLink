@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { makeCommand, hasBridge, callNative, createClient } from '../src/api.mjs';
+import { readHistoryPage } from '../src/history-model.mjs';
 
 test('untrusted Unicode input reaches shell only as base64', () => {
   const payload = { code: "手机'; $(touch /data/fail) `id`\n\"网络" };
@@ -41,35 +42,19 @@ test('history pages and clear preserve sharing and reject stale cursors', async 
   const client = createClient({ preview: true, usbPreview: true, historyPreview: true });
   await client.request('create-mesh');
   let status = await client.request('set-sharing', { enabled: true });
-  assert.equal(status.history.entries.length, 20);
-  assert.equal(status.history.count, 25);
+  assert.equal(status.history.count, 125);
+  assert.equal(status.history.limit, 1000);
   const epoch = status.history.epoch;
-  const older = await client.request('history', { before: status.history.entries.at(-1).id, epoch });
-  assert.equal(older.entries.length, 5); assert.equal(older.hasMore, false);
+  const read = payload => client.request('history', payload);
+  const first = await readHistoryPage(read, { before: 0, epoch, filter: 'all', query: '' }, status.history);
+  assert.equal(first.entries.length, 100);
+  const older = await readHistoryPage(read, { before: first.entries.at(-1).id, epoch, filter: 'all', query: '' });
+  assert.equal(older.entries.length, 25); assert.equal(older.hasMore, false);
+  assert.equal(new Set([...first.entries, ...older.entries].map(item => item.id)).size, 125);
   status = await client.request('clear-history');
   assert.equal(status.sharing.active, true); assert.equal(status.mesh.running, true);
   assert.equal(status.history.count, 0); assert.deepEqual(status.history.entries, []);
   await assert.rejects(client.request('history', { before: 5, epoch }), /历史记录已更新/);
-});
-
-test('Root preference persists across sharing and cannot fake unsupported ROM success', async () => {
-  const client = createClient({ preview: true, usbPreview: true });
-  assert.equal((await client.request('status')).adbRoot.enabled, true);
-  let status = await client.request('set-adb-root', { enabled: false });
-  assert.equal(status.adbRoot.active, false);
-  status = await client.request('create-mesh');
-  assert.equal(status.mesh.running, false, 'Root preference does not connect the mesh');
-  await client.request('set-sharing', { enabled: true });
-  status = await client.request('set-sharing', { enabled: false });
-  assert.equal(status.adbRoot.enabled, false);
-  status = await client.request('set-adb-root', { enabled: true });
-  assert.equal(status.adbRoot.active, true);
-  const unsupported = createClient({ preview: true, rootPreview: 'unsupported' });
-  status = await unsupported.request('set-adb-root', { enabled: true });
-  assert.equal(status.adbRoot.enabled, true); assert.equal(status.adbRoot.active, false);
-  assert.equal(status.adbRoot.state, 'unsupported');
-  await assert.rejects(createClient({}).request('set-adb-root', { enabled: true }), /普通浏览器无法控制/);
-  await assert.rejects(client.request('set-adb-root', { enabled: 'true' }), /开关值无效/);
 });
 
 test('native callback uses official errno/stdout contract and cleans up', async () => {
@@ -82,7 +67,7 @@ test('native callback uses official errno/stdout contract and cleans up', async 
   assert.deepEqual(Object.keys(scope), ['ksu']);
 });
 
-test('KsuWebUI host uses the shared three-argument bridge without retrying a denied operation', async () => {
+test('legacy exec-only host keeps three-argument compatibility without retrying a denied operation', async () => {
   let calls = 0;
   // Models the Java-injected KsuWebUI interface, which also exposes other exec overloads.
   const scope = { ksu: { exec(...args) {
@@ -101,6 +86,88 @@ test('KsuWebUI host uses the shared three-argument bridge without retrying a den
   });
   assert.equal(calls, 1);
   assert.deepEqual(Object.keys(scope), ['ksu']);
+});
+
+function spawnHost() {
+  let callback, calls = 0, execCalls = 0;
+  const scope = { ksu: {
+    spawn(command, args, options, name) {
+      calls++; callback = name;
+      assert.match(command, /^\/data\/adb\/modules\/usblink-mobile\/bin\/usblinkctl /);
+      assert.equal(args, '[]'); assert.equal(options, '{}');
+    },
+    exec() { execCalls++; throw new Error('must not replay through exec'); },
+  } };
+  return { scope, receiver: () => scope[callback], counts: () => [calls, execCalls] };
+}
+
+test('native spawn returns before completion, assembles lines and never calls blocking exec', async () => {
+  const host = spawnHost();
+  let done = false;
+  const result = callNative('set-sharing', { enabled: true }, host.scope).then(value => { done = true; return value; });
+  await new Promise(resolve => setTimeout(resolve, 0));
+  assert.equal(done, false, 'event loop can run while the native command is pending');
+  for (const line of ['{', '"ok":true,', '"data":{"model":"手机","text":"hello\\nworld"}', '}']) host.receiver().stdout.emit('data', line);
+  host.receiver().stderr.emit('data', 'PRIVATE_SENTINEL');
+  assert.equal(done, false, 'stdout alone does not confirm command completion');
+  host.receiver().emit('exit', 0);
+  assert.deepEqual(await result, { model: '手机', text: 'hello\nworld' });
+  assert.deepEqual(host.counts(), [1, 0]);
+  assert.deepEqual(Object.keys(host.scope), ['ksu']);
+});
+
+test('spawn-only hosts are recognized and backend denial is preserved through exit then error', async () => {
+  const host = spawnHost(); delete host.scope.ksu.exec;
+  assert.equal(hasBridge(host.scope), true);
+  const result = callNative('set-sharing', { enabled: true }, host.scope);
+  host.receiver().stdout.emit('data', '{"ok":false,"error":"请先开启 USB 调试"}');
+  host.receiver().emit('exit', 1);
+  host.receiver().emit('error', { exitCode: 1, message: 'PRIVATE_SENTINEL' });
+  await assert.rejects(result, /请先开启 USB 调试/);
+  assert.deepEqual(host.counts(), [1, 0]);
+  assert.deepEqual(Object.keys(host.scope), ['ksu']);
+});
+
+test('spawn errors and synchronous bridge exceptions never expose native details or retry', async () => {
+  for (const synchronous of [false, true]) {
+    const host = spawnHost();
+    if (synchronous) {
+      const native = host.scope.ksu.spawn;
+      host.scope.ksu.spawn = (...args) => { native(...args); throw new Error('PRIVATE_SENTINEL'); };
+    }
+    const result = callNative('set-sharing', { enabled: false }, host.scope);
+    if (!synchronous) host.receiver().emit('error', { message: 'PRIVATE_SENTINEL', exitCode: -1 });
+    await assert.rejects(result, error => {
+      assert.doesNotMatch(error.message, /PRIVATE_SENTINEL/); return true;
+    });
+    host.receiver().stdout.emit('data', '{"ok":true,"data":{}}');
+    host.receiver().emit('exit', 0);
+    assert.deepEqual(host.counts(), [1, 0]);
+    assert.deepEqual(Object.keys(host.scope), ['ksu']);
+  }
+});
+
+test('spawn timeout ignores late output and completion without replaying a sharing operation', async () => {
+  const host = spawnHost();
+  await assert.rejects(callNative('set-sharing', { enabled: true }, host.scope, 5), /操作结果尚未确认/);
+  host.receiver().stdout.emit('data', '{"ok":true,"data":{}}');
+  host.receiver().stderr.emit('data', 'PRIVATE_SENTINEL');
+  host.receiver().emit('exit', 1);
+  host.receiver().emit('error', { exitCode: 1 });
+  assert.deepEqual(host.counts(), [1, 0]);
+  assert.deepEqual(Object.keys(host.scope), ['ksu']);
+});
+
+test('spawn rejects oversized or malformed replies instead of confirming success', async () => {
+  for (const oversized of [false, true]) {
+    const host = spawnHost();
+    const result = callNative('status', {}, host.scope);
+    host.receiver().stdout.emit('data', oversized ? 'a'.repeat(128 * 1024) : 'PRIVATE_SENTINEL');
+    host.receiver().emit('exit', 0);
+    await assert.rejects(result, oversized ? /过长/ : /无法识别/);
+    assert.deepEqual(host.counts(), [1, 0]);
+    assert.deepEqual(Object.keys(host.scope), ['ksu']);
+  }
 });
 
 test('backend failures are surfaced without raw shell stderr or invalid JSON', async () => {

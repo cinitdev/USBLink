@@ -6,7 +6,7 @@ import java.util.*;
 public final class TcpAdbTestMain {
     private static int checks;
     public static void main(String[] args)throws Exception {
-        lifecycle();failureRecovery();conflicts();rootRestart();firewall();firewallMaintenance();
+        lifecycle();failureRecovery();conflicts();firewall();firewallMaintenance();
         System.out.println("PASS: "+checks+" system adbd TCP safety checks");
     }
     static void check(boolean value,String message){checks++;if(!value)throw new AssertionError(message);}
@@ -58,17 +58,6 @@ public final class TcpAdbTestMain {
         tcp.start();system.guard=false;reject(tcp::port,"Lost firewall fails closed");tcp.restore();check(!system.guard && !system.listening,"Recovery reinstalls guard before stopping adbd");
         Files.writeString(path.resolve("adbd-tcp.json"),"broken");reject(tcp::restore,"Malformed recovery record does not guess prior state");
         check(!TcpAdb.validProperty("1;reboot") && !TcpAdb.validProperty("65536") && TcpAdb.validProperty("-1"),"Only valid fixed property values");
-    }
-    static void rootRestart()throws Exception {
-        FakeSystem system=new FakeSystem();Path path=dir();system.path=path;TcpAdb tcp=new TcpAdb(path,system);
-        tcp.prepareRestart();check(system.events.isEmpty(),"Root-only change does not create TCP state");
-        tcp.start();system.now=20000;int before=system.restarts;tcp.prepareRestart();system.listening=false;
-        check(tcp.port()==0 && system.restarts==before,"Root restart grants a fresh bounded listener observation window without submitting restart");
-        system.now=31000;reject(tcp::port,"Fresh Root listener window still expires");system.listening=true;
-        system.guard=false;reject(tcp::prepareRestart,"Root change cannot restart an unprotected managed port");system.guard=true;
-        system.foreign=true;reject(tcp::prepareRestart,"Root change cannot adopt another process listener");system.foreign=false;
-        system.persistent="5555";reject(tcp::prepareRestart,"Root change preserves external persistent TCP settings");system.persistent="";
-        tcp.prepareRestart();check(system.restarts==before,"Restart preparation only validates and sets a deadline");tcp.restore();
     }
     static void firewall()throws Exception {
         FirewallRunner runner=new FirewallRunner();TcpFirewall firewall=new TcpFirewall(runner);

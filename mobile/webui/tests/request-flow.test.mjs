@@ -93,7 +93,6 @@ test('unconfirmed responses stay errors and disposed views ignore late completio
 });
 
 test('stable pages poll less often, transitions stay responsive and failures back off', () => {
-  assert.equal(pollDelay({ ...state(false), adbRoot: { state: 'changing' } }), 2000);
   assert.equal(pollDelay(state(false)), 5000);
   assert.equal(pollDelay(state(true)), 2000);
   assert.equal(pollDelay({ sharing: { state: 'starting' }, mesh: {} }), 2000);

@@ -1,14 +1,20 @@
 import React, { useCallback, useEffect, useLayoutEffect, useRef, useState } from 'react';
 import { createRoot } from 'react-dom/client';
-import { Phone24Regular, Link24Regular, Settings24Regular, UsbPlug24Regular, ArrowSync20Regular, ShieldCheckmark24Regular, Desktop24Regular, Copy20Regular, Checkmark20Regular, Dismiss20Regular, ChevronRight20Regular, Info20Regular } from '@fluentui/react-icons';
+import { Phone24Regular, Link24Regular, History24Regular, Settings24Regular, UsbPlug24Regular, ArrowSync20Regular, ShieldCheckmark24Regular, Desktop24Regular, Copy20Regular, Checkmark20Regular, Dismiss20Regular, ChevronRight20Regular, Info20Regular } from '@fluentui/react-icons';
 import { createClient } from './api.mjs';
 import { createRequestFlow, createStatusPolling, pollDelay } from './request-flow.mjs';
 import { CommandHistory } from './history.jsx';
-import { AdbRootControl } from './adb-root.jsx';
+import { HomeDebugControls } from './home-debug.jsx';
+import { DeviceOverview } from './device-overview.jsx';
 import './styles.css';
 
-const client = createClient({ preview: new URLSearchParams(window.location.search).get('preview') === '1', scope: window, usbPreview: new URLSearchParams(window.location.search).get('usb') === '1', disconnectPreview: new URLSearchParams(window.location.search).get('interruption') === '1', historyPreview: new URLSearchParams(window.location.search).get('history') === '1', rootPreview: new URLSearchParams(window.location.search).get('root'), networkPreview: new URLSearchParams(window.location.search).get('network') });
-const pages = [{ id: 'devices', label: '设备', icon: Phone24Regular }, { id: 'connections', label: '连接', icon: Link24Regular }, { id: 'settings', label: '设置', icon: Settings24Regular }];
+const client = createClient({ preview: new URLSearchParams(window.location.search).get('preview') === '1', scope: window, usbPreview: new URLSearchParams(window.location.search).get('usb') === '1', disconnectPreview: new URLSearchParams(window.location.search).get('interruption') === '1', historyPreview: new URLSearchParams(window.location.search).get('history') === '1', debugPreview: new URLSearchParams(window.location.search).get('debug'), networkPreview: new URLSearchParams(window.location.search).get('network') });
+const pages = [
+  { id: 'devices', label: '设备', title: '我的设备', subtitle: '手机与电脑，连接就在身边。', icon: Phone24Regular },
+  { id: 'connections', label: '连接', title: '连接管理', subtitle: '同一个网络，连接你的每台设备。', icon: Link24Regular },
+  { id: 'history', label: '历史', title: '历史记录', subtitle: '远程调试、应用安装与文件传输。', icon: History24Regular },
+  { id: 'settings', label: '设置', title: '设置', subtitle: '共享偏好、调试权限与运行环境。', icon: Settings24Regular },
+];
 const statusLabels = { off: '共享已关闭', starting: '正在启动调试服务', waiting_system: '等待系统启动就绪', waiting_network: '等待设备网络', sharing: '正在共享', error: '共享遇到问题' };
 
 function CopyField({ label, value, secret = false }) {
@@ -43,6 +49,7 @@ function SyncStatus({ observed, stale, busy, unavailable }) {
 function App() {
   const [page, setPage] = useState('devices');
   const [status, setStatus] = useState(null);
+  const [usbDebugging, setUsbDebugging] = useState(null);
   const [busy, setBusy] = useState('');
   const [pendingEnabled, setPendingEnabled] = useState(false);
   const [refreshing, setRefreshing] = useState(false);
@@ -129,26 +136,40 @@ function App() {
   const showGuide = () => { setGuideOpen(true); setPage('connections'); };
   const busyMessage = busy === 'set-sharing' ? pendingEnabled ? '正在连接网络并开启共享…' : '正在停止共享、断开网络并恢复调试配置…' : ({ 'create-mesh': '正在创建网络…', 'join-mesh': '正在加入网络…', 'leave-mesh': '正在退出网络…', 'pairing-code': '正在读取网络配对码…', 'open-debug-settings': '正在打开系统设置…', 'set-relay': '正在保存中继地址…', disconnect: '正在断开会话…' }[busy] || '');
 
-  return <div className="app-shell">
-    <header className="topbar"><div className="brand"><span className="brand-mark"><UsbPlug24Regular /></span><span>USBLink<small>手机端</small></span></div><div className="topbar-status"><SyncStatus observed={observed} stale={stale} busy={busy} unavailable={unavailable} /><button className={`icon-button refresh ${loading || refreshing ? 'working' : ''}`} onClick={refresh} disabled={!!busy || loading || refreshing} aria-label="立即刷新状态" title="状态自动同步，也可立即刷新"><ArrowSync20Regular /></button></div></header>
+  const currentPage = pages.find(item => item.id === page);
+  return <div className={'app-shell page-' + page}>
+    <header className="topbar">
+      <div className="brand"><UsbPlug24Regular /><span>USBLink</span></div>
+      <span className="brand-caption">DEVICE CENTER</span>
+    </header>
     {client.preview && <div className="preview-banner"><Info20Regular /><span>交互预览 · 示例数据，不会操作手机</span></div>}
-    <main>
-      <div className="page-heading"><div><p className="eyebrow">{page === 'devices' ? 'YOUR DEVICE' : page === 'connections' ? 'STAY CONNECTED' : 'PREFERENCES'}</p><h1>{pages.find(item => item.id === page).label}</h1></div><span className="module-label">Root 模块</span></div>
+    <main id="main-content">
+      <div className="page-heading">
+        <div><h1>{currentPage.title}</h1><p className="page-subtitle">{currentPage.subtitle}</p></div>
+        <button className={'icon-button refresh ' + (loading || refreshing ? 'working' : '')} onClick={refresh} disabled={!!busy || loading || refreshing} aria-label="立即刷新状态" title="状态自动同步，也可立即刷新"><ArrowSync20Regular /></button>
+      </div>
+      <div className="page-status"><span className="module-label">Android · Root 模块</span><SyncStatus observed={observed} stale={stale} busy={busy} unavailable={unavailable} /></div>
       {error && <div className="message error" role="alert"><Info20Regular /><div><strong>{unavailable ? '请在模块管理器中打开' : '暂时无法确认服务状态'}</strong><p>{error}</p>{!unavailable && <button className="text-button" disabled={!!busy} onClick={refresh}>重新读取状态</button>}</div></div>}
       {actionError && <div className="message error" role="alert"><Info20Regular /><div><strong>操作未完成</strong><p>{actionError}</p></div><button className="icon-button" aria-label="关闭操作错误" onClick={() => setActionError('')}><Dismiss20Regular /></button></div>}
       {busyMessage && <div className="operation-status" role="status"><span className="progress-ring" />{busyMessage}<span>可以切换页面</span></div>}
       {notice && <div className="message notice" role="status"><Checkmark20Regular /><span>{notice}</span><button className="icon-button" aria-label="关闭提示" onClick={() => setNotice('')}><Dismiss20Regular /></button></div>}
       {loading && !status ? <div className="loading-state"><ArrowSync20Regular /><p>正在读取手机服务…</p></div> : <>
         {page === 'devices' && <>
-          <section className={`sharing-panel ${sharing.active && !stale ? 'is-active' : ''}`} aria-label="共享控制"><div className="sharing-top"><span className="hero-icon"><Phone24Regular /></span><Badge active={sharing.active && !stale} warning={stale || sharing.state === 'error'}>{stale ? '状态未确认' : statusLabels[sharing.state] || '服务不可用'}</Badge></div><h2>{s?.device?.model || '本机设备'}</h2><p className="device-meta">{s ? `Android ${s.device?.androidVersion || '—'}${s.device?.modelCode && s.device.modelCode !== s.device.model ? ` · ${s.device.modelCode}` : ''}` : '等待连接手机后台服务'}</p><div className="sharing-control"><div><strong>{usbMode ? '共享这台手机' : '共享本机调试'}</strong><p>{busy === 'set-sharing' ? busyMessage : sharing.enabled ? '已允许 · 实际连接状态见上方' : '开启时连接网络，关闭时断网并保留配对'}</p></div><button className="switch" role="switch" aria-checked={!!sharing.enabled} aria-busy={busy === 'set-sharing'} aria-label="共享本机调试" disabled={disabled} onClick={() => run('set-sharing', { enabled: !sharing.enabled }, sharing.enabled ? '共享和网络已关闭，配对码已保留。' : '已保存开启状态，请查看下方准备情况。')}><span /></button></div></section>
-          <button className="session-shortcut" onClick={() => setPage('connections')}><Desktop24Regular /><span>{stale ? '连接状态待同步' : sessions.length ? `${sessions.length} 台电脑已连接` : sharing.active ? '等待电脑连接' : sharing.state === 'error' ? '共享已暂停，请检查提示' : sharing.enabled ? '共享准备中' : '远程连接已关闭'}</span><ChevronRight20Regular /></button>
+          <DeviceOverview
+            enableBlocked={usbDebugging === true ? '' : usbDebugging === false ? '请先开启下方 USB 调试，再开启共享' : '正在确认 USB 调试，确认开启后才能共享'}
+            device={s?.device} sharing={sharing} stale={stale} disabled={disabled}
+            busy={busy} busyMessage={busyMessage} usbMode={usbMode} sessions={sessions}
+            statusLabel={statusLabels[sharing.state] || '服务不可用'}
+            onConnections={() => setPage('connections')}
+            onToggle={() => run('set-sharing', { enabled: !sharing.enabled }, sharing.enabled ? '共享和网络已关闭，配对码已保留。' : '已保存开启状态，请查看下方准备情况。')}
+          />
           <LastDisconnect event={s?.lastDisconnect} />
-          <p className="quiet-note"><ShieldCheckmark24Regular /><span>开关状态自动保存，无需重启手机。切换模式会重启系统 adbd，现有调试连接可能短暂断开。</span></p>
+          <p className="quiet-note"><ShieldCheckmark24Regular /><span>开关状态自动保存，无需重启手机。切换共享会重启系统 adbd，现有调试连接可能短暂断开。</span></p>
           {sharing.problem && <div className={`message ${sharing.state === 'error' ? 'error' : 'notice'}`} role="status"><Info20Regular /><div><p>{sharing.problem}</p>{sharing.state === 'error' && <button className="text-button" disabled={!!busy || unavailable} onClick={() => run('set-sharing', { enabled: false }, '共享和网络已关闭，调试配置已恢复，配对码已保留。')}>关闭共享并重试恢复</button>}</div></div>}
-          <SectionTitle detail={usbMode ? 'USB ADB · 实验版' : undefined}>连接准备</SectionTitle><section className="group">
+          <HomeDebugControls client={client} disabled={disabled} busy={busy} run={run} onUsbDebugging={setUsbDebugging} />
+          <SectionTitle detail={usbMode ? 'USB ADB' : undefined}>连接准备</SectionTitle><section className="group">
             <Row icon={Link24Regular} title="设备网络" detail={stale ? '状态待同步' : mesh.configured ? networkDetail : '先保存与电脑相同的 USBLink 网络配对'}><button className="row-link" onClick={() => setPage('connections')} aria-label="设置设备网络">{stale ? '查看' : mesh.statusDegraded ? '状态待确认' : mesh.running ? '已连接' : networkPaused ? '已断开' : '设置'}<ChevronRight20Regular /></button></Row>
             <Row icon={Desktop24Regular} title="电脑发现" detail={stale ? '状态待同步' : s?.appSession?.problem || (s?.appSession?.ready ? `已就绪 · 电脑端 ${usbMode ? '0.3.11' : '0.3.10'} 或以上` : sharing.enabled ? '等待设备网络就绪' : '开启共享后联网，电脑才能发现本机')} />
-            <Row icon={Settings24Regular} title="系统 USB 调试" detail={stale ? '状态待同步' : debug.enabled ? '调试服务已就绪 · 首次连接需在手机授权' : ['waiting_system', 'starting'].includes(sharing.state) ? '系统调试服务正在准备，请稍候' : '请开启 USB 调试，不需要插线，也不用开启无线调试'}><button className="row-link" disabled={disabled} onClick={() => run('open-debug-settings', {}, client.preview ? '预览不会打开系统设置。' : '')}>打开<ChevronRight20Regular /></button></Row>
           </section>
           <SectionTitle detail="首次连接需要授权">电脑连接</SectionTitle><section className="instruction-panel"><div className="instruction-title"><Desktop24Regular /><strong>让电脑直接调试这部手机</strong></div><p>{usbMode ? '电脑点击连接，现有 ADB 通过 USB 接口发现手机。仅含 ADB，不含 MTP 文件传输。' : '安装 APK、运行 Android Studio，使用电脑现有的 ADB。'}</p><button className="primary-button full" onClick={showGuide}>查看连接步骤<ChevronRight20Regular /></button></section>
           <p className="quiet-note feature-note"><Info20Regular /><span>当前仅共享本机 ADB，暂不支持 MTP、U 盘和外接手机。</span></p>
@@ -159,7 +180,6 @@ function App() {
           {mesh.problem && <div className={`message ${mesh.statusDegraded ? 'notice' : 'error'}`}><Info20Regular /><p>{mesh.problem}</p></div>}
           <LastDisconnect event={s?.lastDisconnect} />
           <SectionTitle detail={stale ? '上次记录 · 待同步' : `${sessions.length} 个会话`}>当前连接</SectionTitle><section className="group">{s?.sessions?.length ? s.sessions.map(session => <Row key={session.id} icon={Desktop24Regular} title={mesh.peers?.find(peer => peer.ip === session.peer)?.name || session.peer || '远程电脑'} detail={stale ? '上次连接记录 · 等待状态同步' : usbMode ? 'USB ADB 挂载 · 调试权限由系统授权决定' : 'ADB 传输会话 · 不代表已获授权'}><button className="text-button danger" disabled={disabled} onClick={() => run('disconnect', { id: session.id }, '已断开指定会话。')}>断开</button></Row>) : <div className="empty-state"><Desktop24Regular /><strong>暂无远程会话</strong><p>成功连接后，电脑会显示在这里。</p></div>}</section>
-          <CommandHistory history={s?.history} stale={stale} disabled={disabled} busy={busy} run={run} />
           <details className="connection-help" open={guideOpen} onToggle={event => setGuideOpen(event.currentTarget.open)}><summary><Info20Regular />首次连接指南<ChevronRight20Regular /></summary><section className="steps-panel"><ol className="steps">
             <li><span className="step-number">1</span><div><strong>开启系统 USB 调试</strong><p>在开发者选项打开「USB 调试」，用于系统电脑授权。不需要插 USB 线，也不用开启无线调试。</p><button className="text-button" disabled={disabled} onClick={() => run('open-debug-settings', {}, client.preview ? '预览不会打开系统设置。' : '')}>打开开发者设置<ChevronRight20Regular /></button></div></li>
             <li><span className="step-number">2</span><div><strong>在设备页开启共享</strong><p>开启后先连接已保存的网络，再准备调试共享。关闭时断开网络并保留配对码。切换时已有 ADB 连接可能短暂断开。</p><button className="secondary-button" onClick={() => setPage('devices')}>前往共享开关</button></div></li>
@@ -168,14 +188,15 @@ function App() {
 
           {(mesh.peers || []).length > 0 && <><SectionTitle>同一网络的设备</SectionTitle><section className="group">{mesh.peers.map((peer, index) => <Row key={peer.ip || index} icon={Desktop24Regular} title={peer.name || '网络设备'} detail={`${peer.ip || '地址未知'}${peer.latency != null ? ` · ${peer.latency} ms` : ''}`} />)}</section><p className="quiet-note">网络可达不代表对方已经连接或获得 ADB 授权。</p></>}
         </>}
+        {page === 'history' && <CommandHistory history={s?.history} stale={stale} disabled={disabled} busy={busy} run={run} />}
         {page === 'settings' && <>
-          <AdbRootControl value={s?.adbRoot} stale={stale} disabled={disabled} busy={busy} run={run} />
           <SectionTitle>服务与设备</SectionTitle><section className="group"><Row icon={Phone24Regular} title={s?.device?.model || '等待手机信息'} detail={s ? `${s.device?.modelCode || 'Android'} · Android ${s.device?.androidVersion || '—'}` : '请从模块管理器打开'} /><Row icon={ShieldCheckmark24Regular} title="后台服务" detail="DEX JAR · app_process"><Badge active={!!s && !stale}>{stale ? '状态未知' : s ? '可响应' : '未连接'}</Badge></Row><Row icon={UsbPlug24Regular} title="USBLink 手机版" detail={`版本 ${s?.version || '—'} · Magisk / APatch / KernelSU`} /></section>
           <SectionTitle>网络中继</SectionTitle><section className="instruction-panel"><p className="muted">用于建立异地设备网络。共享开启时，修改会更新连接并可能中断现有会话；共享关闭时只保存设置。</p><form onSubmit={async e => { e.preventDefault(); const value = relay.trim(); if (!/^(tcp|udp):\/\/[^\s/:]+:\d{1,5}$/.test(value)) { setNotice('请输入 tcp://地址:端口 或 udp://地址:端口。'); return; } const result = await run('set-relay', { relay: value }, '中继设置已保存。'); if (result) setRelayEdited(false); }}><label htmlFor="relay">中继地址</label><input id="relay" type="text" inputMode="url" value={relay} autoCapitalize="off" autoComplete="off" spellCheck="false" disabled={disabled} onChange={e => { setRelay(e.target.value); setRelayEdited(true); }} /><button className="secondary-button full" disabled={disabled || !relayEdited || !relay.trim()}>{busy === 'set-relay' ? '正在保存…' : '保存中继地址'}</button></form></section>
-          <SectionTitle>共享行为</SectionTitle><section className="group"><Row icon={ArrowSync20Regular} title="自动同步状态" detail="共享时每 2 秒、关闭时每 5 秒静默更新；返回页面立即同步。" /><Row icon={Checkmark20Regular} title="记住共享开关" detail="开关与配对信息保存在手机后台；关闭时断开网络，再开启使用原配对码。" /><Row icon={ShieldCheckmark24Regular} title="系统授权决定调试权限" detail="网络配对不代替 Android 的 RSA 调试授权。请只向自己的电脑提供配对信息。" /></section><div className="about-note"><span className="brand-mark small"><UsbPlug24Regular /></span><strong>USBLink</strong><p>让手机和电脑，直接连接。</p><small>{usbMode ? 'USB ADB 实验版：只验证了 K40 / Android 12，暂不支持 MTP、Fastboot 或外接 USB。' : '本版本共享手机系统 adbd，电脑使用现有 ADB。'}关闭共享会停止网络、撤销远程连接并恢复调试端口；保留本地管理服务，后台页面暂停刷新。</small></div>
+          <SectionTitle>共享行为</SectionTitle><section className="group"><Row icon={ArrowSync20Regular} title="自动同步状态" detail="共享时每 2 秒、关闭时每 5 秒静默更新；返回页面立即同步。" /><Row icon={Checkmark20Regular} title="记住共享开关" detail="开关与配对信息保存在手机后台；关闭时断开网络，再开启使用原配对码。" /><Row icon={ShieldCheckmark24Regular} title="系统授权决定调试权限" detail="网络配对不代替 Android 的 RSA 调试授权。请只向自己的电脑提供配对信息。" /></section><div className="about-note"><span className="brand-mark small"><UsbPlug24Regular /></span><strong>USBLink</strong><p>让手机和电脑，直接连接。</p><small>{usbMode ? 'USB ADB 共享 · Android 12+ / ARM64。暂不支持 MTP、Fastboot 或外接 USB。' : '本版本共享手机系统 adbd，电脑使用现有 ADB。'}关闭共享会停止网络、撤销远程连接并恢复调试端口；保留本地管理服务，后台页面暂停刷新。</small></div>
         </>}
       </>}
-      <div className="page-bottom" />
+      <footer className="page-footer"><span>USBLink Mobile</span><span>让连接，更简单</span></footer>
+      <div className="page-bottom" aria-hidden="true" />
     </main>
     <nav className="bottom-nav" aria-label="主导航">{pages.map(({ id, label, icon: Icon }) => <button key={id} className={page === id ? 'selected' : ''} onClick={() => setPage(id)} aria-current={page === id ? 'page' : undefined}><span><Icon /></span>{label}</button>)}</nav>
   </div>;

@@ -16,7 +16,27 @@ import java.util.concurrent.atomic.AtomicReference;
 /** Bounded userspace USB/IP v1.1.1 experiment: one ADB device, one manual import. */
 public final class UsbIpServer implements Closeable {
     public interface Backend { Socket connect() throws IOException; }
+    public interface TrafficObserver extends Consumer<byte[]> {
+        void returned(byte[] bytes);
+        void close();
+    }
+    /** An authenticated desktop process instance and its cleanup phase. */
+    public static final class Owner {
+        private final byte[] instance;
+        private final int phase;
+        public Owner(byte[] instance,int phase) {
+            if(instance.length!=16 || phase<0 || phase>3)throw new IllegalArgumentException("invalid owner");
+            this.instance=instance.clone();this.phase=phase;
+        }
+        boolean supersedes(Owner old) {
+            boolean same=Arrays.equals(instance,old.instance);
+            // A new process must finish startup cleanup first. Missing/failed
+            // observations and traffic inactivity cannot evict a working mount.
+            return same?phase==2:phase==1;
+        }
+    }
     public enum EndReason {
+        DESKTOP_REPLACED("电脑程序已退出或更新，旧 USB 会话已释放，请在电脑手动连接",true),
         CLIENT_CLOSED("电脑侧 USB/IP 连接已结束，可能是断开操作或网络中断",false),
         CLIENT_IO("电脑侧 USB/IP 读写中断，请检查电脑与网络",false),
         ADB_CLOSED("手机系统 adbd 已结束调试连接",false),
@@ -47,6 +67,10 @@ public final class UsbIpServer implements Closeable {
     private final Consumer<String> log;
     private final Consumer<Map<String,Object>> onDisconnect;
     private final Function<String,Consumer<byte[]>> observeUpload;
+    private final Function<InetAddress,Owner> observeOwner;
+    private final ScheduledExecutorService ownerChecks=Executors.newSingleThreadScheduledExecutor(r->{
+        Thread t=new Thread(r,"usblink-usb-owner");t.setDaemon(true);return t;
+    });
     private final ServerSocket listener = new ServerSocket();
     private final Set<Socket> clients = new HashSet<>();
     private final Set<Socket> targets = new HashSet<>();
@@ -74,7 +98,14 @@ public final class UsbIpServer implements Closeable {
     public UsbIpServer(InetAddress bind, int port, Predicate<InetAddress> peer, AdbUsbDevice device,
                        Backend backend, Consumer<String> log, Consumer<Map<String,Object>> onDisconnect,
                        Function<String,Consumer<byte[]>> observeUpload) throws IOException {
+        this(bind,port,peer,device,backend,log,onDisconnect,observeUpload,address->null);
+    }
+    public UsbIpServer(InetAddress bind, int port, Predicate<InetAddress> peer, AdbUsbDevice device,
+                       Backend backend, Consumer<String> log, Consumer<Map<String,Object>> onDisconnect,
+                       Function<String,Consumer<byte[]>> observeUpload,
+                       Function<InetAddress,Owner> observeOwner) throws IOException {
         this.device=device; this.backend=backend; this.allowedPeer=peer; this.log=log;this.onDisconnect=onDisconnect;this.observeUpload=observeUpload;
+        this.observeOwner=observeOwner;
         try {
             // Devlist replies and revoked imports actively close accepted sockets. Linux
             // retains their local port in TIME_WAIT; allow the next share to bind it again.
@@ -101,6 +132,26 @@ public final class UsbIpServer implements Closeable {
         s.end(EndReason.USER_DISCONNECT);
     }
     public long firstImportNanos() { return firstImportNanos; }
+    private Owner owner(InetAddress peer) {
+        try{return observeOwner.apply(peer);}catch(RuntimeException ignored){return null;}
+    }
+    private void releaseReplaced(Session old) {
+        if(old==null || old.owner==null || old.stopped || closed)return;
+        Owner current=owner(old.client.getInetAddress());
+        if(current!=null && session==old && current.supersedes(old.owner))old.end(EndReason.DESKTOP_REPLACED);
+    }
+    private void awaitOldSession()throws IOException {
+        Session old=session;
+        if(old==null)return;
+        releaseReplaced(old);
+        if(!old.stopped)return;
+        // Wait for socket/queue workers AND the import gate to finish cleanup.
+        // This is before the sole import acceptance, never a second attach.
+        try {
+            if(!old.finished.await(3500,TimeUnit.MILLISECONDS))throw new IOException("old session cleanup pending");
+        }catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException("interrupted",e);}
+    }
+    private boolean acquireImport(){synchronized(imported){return imported.compareAndSet(false,true);}}
     private void accept() {
         while (!closed) {
             try {
@@ -117,6 +168,7 @@ public final class UsbIpServer implements Closeable {
     private void release(Socket s){synchronized(clients){clients.remove(s);}quietClose(s);}
     private void handle(Socket socket) {
         boolean owns=false;
+        Session owned=null;
         try {
             socket.setTcpNoDelay(true);socket.setSoTimeout(5000);
             DataInputStream in=new DataInputStream(new BufferedInputStream(socket.getInputStream()));
@@ -130,7 +182,11 @@ public final class UsbIpServer implements Closeable {
             byte[] bus=new byte[32];in.readFully(bus);
             byte[] expected=new byte[32];byte[] name=AdbUsbDevice.BUS_ID.getBytes(StandardCharsets.US_ASCII);
             System.arraycopy(name,0,expected,0,name.length);
-            if(!Arrays.equals(bus,expected) || !(owns=imported.compareAndSet(false,true))) {reply(out,3,1);return;}
+            if(!Arrays.equals(bus,expected)){reply(out,3,1);return;}
+            if(imported.get())awaitOldSession();
+            if(!(owns=acquireImport())){reply(out,3,1);return;}
+            Owner desktop=owner(socket.getInetAddress());
+            if(desktop!=null && desktop.phase!=1)throw new IOException("desktop cleanup pending");
             device.reset();
             try(Socket target=backend.connect()) {
                 synchronized(clients){if(closed)throw new IOException("sharing stopped");targets.add(target);}
@@ -139,12 +195,18 @@ public final class UsbIpServer implements Closeable {
                 if(firstImportNanos<0)firstImportNanos=System.nanoTime();
                 reply(out,3,0);out.write(device.record());socket.setSoTimeout(0);
                 log.accept("import accepted");
-                Session s=new Session(socket,target,in,out);session=s;if(closed)s.end(closeReason);
-                try{s.run();}finally{session=null;}
+                Session s=new Session(socket,target,in,out,desktop);owned=s;session=s;if(closed)s.end(closeReason);
+                ScheduledFuture<?> watch=desktop==null || closed?null:
+                    ownerChecks.scheduleWithFixedDelay(()->releaseReplaced(s),5,5,TimeUnit.SECONDS);
+                try{s.run();}finally{if(watch!=null)watch.cancel(false);}
                 }finally{synchronized(clients){targets.remove(target);}}
             }
         } catch(IOException|RuntimeException e) {log.accept("session closed: "+e.getClass().getSimpleName());}
-        finally {if(owns)imported.set(false);release(socket);}
+        finally {
+            release(socket);
+            if(owns)synchronized(imported){session=null;imported.set(false);}
+            if(owned!=null)owned.finished.countDown();
+        }
     }
     private static void reply(DataOutputStream out,int op,int status)throws IOException {
         out.writeShort(0x111);out.writeShort(op);out.writeInt(status);
@@ -154,6 +216,7 @@ public final class UsbIpServer implements Closeable {
     }
     public void close(EndReason reason) {
         closeReason=reason;closed=true;
+        ownerChecks.shutdownNow();
         Session s=session;if(s!=null)s.end(reason);
         quietClose(listener);
         synchronized(clients){for(Socket client:clients)quietClose(client);for(Socket target:targets)quietClose(target);targets.clear();}
@@ -162,6 +225,8 @@ public final class UsbIpServer implements Closeable {
     private static void quietClose(Closeable value){try{value.close();}catch(IOException ignored){}}
 
     private final class Session {
+        final Owner owner;
+        final CountDownLatch finished=new CountDownLatch(1);
         final String id=UUID.randomUUID().toString();
         final long startedAt=System.currentTimeMillis();
         final AtomicLong bytes=new AtomicLong();
@@ -175,9 +240,10 @@ public final class UsbIpServer implements Closeable {
         private int chunkOffset,queuedBytes;
         private volatile boolean stopped;
         private final AtomicReference<EndReason> reason=new AtomicReference<>();
-        private Consumer<byte[]> uploadObserver;
-        Session(Socket client,Socket target,DataInputStream input,DataOutputStream output) {
+        private volatile Consumer<byte[]> uploadObserver;
+        Session(Socket client,Socket target,DataInputStream input,DataOutputStream output,Owner owner) {
             this.client=client;this.target=target;this.input=input;this.output=output;
+            this.owner=owner;
             try{uploadObserver=observeUpload.apply(client.getInetAddress().getHostAddress());}catch(RuntimeException ignored){uploadObserver=null;}
         }
         void run()throws IOException {
@@ -226,13 +292,14 @@ public final class UsbIpServer implements Closeable {
                 quietClose(target);quietClose(client);
                 synchronized(this){notifyAll();}
                 try{reader.join(1000);writer.join(1000);}catch(InterruptedException e){Thread.currentThread().interrupt();}
+                try{Consumer<byte[]> observer=uploadObserver;if(observer instanceof TrafficObserver)((TrafficObserver)observer).close();}catch(RuntimeException ignored){}
                 EndReason ended=reason.get();if(ended==null)ended=EndReason.CLIENT_IO;
                 Map<String,Object> event=new LinkedHashMap<>();event.put("at",System.currentTimeMillis());
                 event.put("code",ended.name());event.put("message",ended.message);event.put("intentional",ended.intentional);event.put("bytes",bytes.get());
                 onDisconnect.accept(Collections.unmodifiableMap(event));
             }
         }
-        void end(EndReason why){reason.compareAndSet(null,why);quietClose(client);quietClose(target);}
+        void end(EndReason why){reason.compareAndSet(null,why);stopped=true;quietClose(client);quietClose(target);}
         private synchronized void enqueueWrite(Request request,byte[] data)throws IOException {
             if(pending.containsKey(request.seq) || outgoing.containsKey(request.seq))throw new ProtocolException("duplicate request");
             if(outgoing.size()>=32 || outgoingBytes+data.length>4*AdbUsbDevice.MAX_TRANSFER) {
@@ -251,8 +318,10 @@ public final class UsbIpServer implements Closeable {
                     }
                     // Preserve byte order with one writer, but never block IN/unlink dispatch
                     // while adbd applies upload backpressure. Complete only after the write.
-                    target.getOutputStream().write(write.data);bytes.addAndGet(write.data.length);
+                    // Observe OPEN before forwarding: a fast adbd reply must not
+                    // arrive before its request exists in the history correlator.
                     try{if(uploadObserver!=null)uploadObserver.accept(write.data);}catch(RuntimeException ignored){uploadObserver=null;}
+                    target.getOutputStream().write(write.data);bytes.addAndGet(write.data.length);
                     synchronized(this) {
                         outgoing.remove(write.request.seq);outgoingBytes-=write.data.length;
                         complete(write.request,0,new byte[0],write.data.length);
@@ -269,10 +338,14 @@ public final class UsbIpServer implements Closeable {
                     ByteBuffer b=ByteBuffer.wrap(header).order(ByteOrder.LITTLE_ENDIAN);
                     int command=b.getInt(0),length=b.getInt(12),magic=b.getInt(20);
                     if(magic!=(command^0xffffffff) || length<0 || length>AdbUsbDevice.MAX_TRANSFER)throw new ProtocolException("invalid ADB packet");
-                    offer(header);
-                    if(length>0){byte[] payload=new byte[length];source.readFully(payload);offer(payload);}
+                    observeReturned(header);offer(header);
+                    if(length>0){byte[] payload=new byte[length];source.readFully(payload);observeReturned(payload);offer(payload);}
                 }
             }catch(IOException e){if(!stopped)end(e instanceof ProtocolException?EndReason.INVALID_ADB:e instanceof EOFException?EndReason.ADB_CLOSED:EndReason.ADB_IO);}
+        }
+        private void observeReturned(byte[] bytes) {
+            try{Consumer<byte[]> observer=uploadObserver;if(observer instanceof TrafficObserver)((TrafficObserver)observer).returned(bytes);}
+            catch(RuntimeException ignored){uploadObserver=null;}
         }
         private synchronized void offer(byte[] bytes)throws IOException {
             while(!stopped && queuedBytes+bytes.length>2*AdbUsbDevice.MAX_TRANSFER) {

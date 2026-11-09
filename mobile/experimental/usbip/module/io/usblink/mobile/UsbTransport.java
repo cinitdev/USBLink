@@ -16,10 +16,12 @@ final class UsbTransport implements SharingTransport {
     private int port,targetPort;
     private boolean closed;
     private volatile Map<String,Object> lastDisconnect;
+    private volatile byte[] ownerKey;
     UsbTransport(Platform platform){this(platform,null);}
     UsbTransport(Platform platform,AdbHistory history){this.platform=platform;this.history=history;}
     public AdbHistory history(){return history;}
     public boolean usb(){return true;}
+    public void presenceKey(byte[] key){ownerKey=key==null?null:key.clone();}
     public synchronized void configure(String kind,String bindIp,int bindPort,int target)throws IOException {
         if(closed)throw new IOException("USB 共享服务已关闭");
         if(!kind.equals("adb"))throw new IOException("不支持的 USB 接口");
@@ -30,7 +32,7 @@ final class UsbTransport implements SharingTransport {
         stopAll("listener_changed");
         Map<String,Object> info=platform.device();
         String serial=String.valueOf(info.getOrDefault("serial",""));
-        if(!serial.matches("[A-Za-z0-9_-]{1,64}") || serial.equalsIgnoreCase("unknown"))throw new IOException("无法读取本机 USB 序列号，未启动实验共享");
+        if(!serial.matches("[A-Za-z0-9_-]{1,64}") || serial.equalsIgnoreCase("unknown"))throw new IOException("无法读取本机 USB 序列号，未启动 USB 共享");
         model=String.valueOf(info.getOrDefault("model","Android"));
         device=new AdbUsbDevice(serial,model,UUID.randomUUID().toString());
         InetAddress address=InetAddress.getByName(bindIp);
@@ -43,7 +45,16 @@ final class UsbTransport implements SharingTransport {
             if(!Boolean.TRUE.equals(event.get("intentional")))lastDisconnect=event;
             // Fixed reason codes and counts only: no pairing, command, path or ADB payload.
             System.out.println("USB 会话结束 "+Json.stringify(event));
-        },peer->history==null?bytes->{}:history.observe(peer));
+        },peer->{
+            if(history==null)return bytes->{};
+            AdbCommandObserver parser=history.parser(peer);
+            return new UsbIpServer.TrafficObserver() {
+                public void accept(byte[] bytes){parser.accept(bytes,0,bytes.length);}
+                public void returned(byte[] bytes){parser.returned(bytes,0,bytes.length);}
+                public void close(){parser.close();}
+            };
+        },
+            peer->DesktopOwner.query(peer,3241,ownerKey));
         ip=bindIp;port=bindPort;targetPort=target;
     }
     public synchronized boolean active(String kind){return server!=null && server.active();}

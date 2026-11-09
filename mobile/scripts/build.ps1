@@ -1,4 +1,4 @@
-param([switch]$SkipTests, [switch]$ExperimentalUsb, [string]$AndroidSdk = $env:ANDROID_HOME)
+param([switch]$SkipTests, [Alias('ExperimentalUsb')][switch]$UsbAdb, [string]$AndroidSdk = $env:ANDROID_HOME)
 $ErrorActionPreference = 'Stop'
 $MobileRoot = Split-Path $PSScriptRoot -Parent
 $RepoRoot = Split-Path $MobileRoot -Parent
@@ -6,7 +6,7 @@ if (-not $AndroidSdk) { $AndroidSdk = Join-Path $env:LOCALAPPDATA 'Android/Sdk' 
 $AndroidJar = Join-Path $AndroidSdk 'platforms/android-35/android.jar'
 $D8 = Join-Path $AndroidSdk 'build-tools/35.0.0/d8.bat'
 if (-not (Test-Path $AndroidJar) -or -not (Test-Path $D8)) { throw 'Install Android SDK platform 35 and build-tools 35.0.0, or supply -AndroidSdk.' }
-$BuildRoot = Join-Path $MobileRoot $(if ($ExperimentalUsb) { 'build/usb-module' } else { 'build' })
+$BuildRoot = Join-Path $MobileRoot $(if ($UsbAdb) { 'build/usb-module' } else { 'build' })
 $Classes = Join-Path $BuildRoot 'classes'
 $TestClasses = Join-Path $BuildRoot 'test-classes'
 $Dex = Join-Path $BuildRoot 'dex'
@@ -25,7 +25,7 @@ function Invoke-Checked([string]$Program, [string[]]$Arguments) {
   if ($Result -ne 0 -or ($Lines -join "`n") -match '(?m)(^|\s)(error:|Exception in thread|java\.nio\.file\.AccessDeniedException)') { throw "Build command failed: $Program" }
 }
 $Sources = @(Get-ChildItem (Join-Path $MobileRoot 'daemon/src') -Recurse -Filter '*.java' | ForEach-Object { $_.FullName })
-if ($ExperimentalUsb) {
+if ($UsbAdb) {
   $Sources = @($Sources | Where-Object { [IO.Path]::GetFileName($_) -ne 'TransportFactory.java' })
   $Sources += @(Get-ChildItem (Join-Path $MobileRoot 'experimental/usbip/src'), (Join-Path $MobileRoot 'experimental/usbip/module') -Recurse -Filter '*.java' | ForEach-Object { $_.FullName })
 }
@@ -33,7 +33,7 @@ if (-not $SkipTests) {
   Invoke-Checked 'node' @((Join-Path $MobileRoot 'tests/root-managers.mjs'))
   $HostSources = @($Sources | Where-Object { [IO.Path]::GetFileName($_) -notin @('Main.java', 'AndroidPlatform.java') })
   $Tests = @(Get-ChildItem (Join-Path $MobileRoot 'daemon/test') -Recurse -Filter '*.java' | ForEach-Object { $_.FullName })
-  if ($ExperimentalUsb) { $Tests += @(Get-ChildItem (Join-Path $MobileRoot 'experimental/usbip/test'), (Join-Path $MobileRoot 'experimental/usbip/module-test') -Recurse -Filter '*.java' | ForEach-Object { $_.FullName }) }
+  if ($UsbAdb) { $Tests += @(Get-ChildItem (Join-Path $MobileRoot 'experimental/usbip/test'), (Join-Path $MobileRoot 'experimental/usbip/module-test') -Recurse -Filter '*.java' | ForEach-Object { $_.FullName }) }
   Invoke-Checked 'javac' (@('--release', '11', '-encoding', 'UTF-8', '-d', $TestClasses) + $HostSources + $Tests)
   Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.TestMain')
   Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.MeshTestMain')
@@ -42,11 +42,14 @@ if (-not $SkipTests) {
   Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.PresenceTestMain')
   Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.TcpAdbTestMain')
   Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.SharingStartupTestMain')
+  Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.UsbDebuggingTestMain')
   Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.AdbHistoryTestMain')
-  Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.AdbRootTestMain')
-  if ($ExperimentalUsb) {
+  Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.AdbResponseTestMain')
+  if ($UsbAdb) {
     Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.usbip.ProtocolTest')
     Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.UsbModuleTest')
+    Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.DesktopOwnerTestMain')
+    Invoke-Checked 'java' @('-cp', $TestClasses, 'io.usblink.mobile.usbip.OwnerLifecycleTest')
   }
   $WebTests = @(Get-ChildItem (Join-Path $MobileRoot 'webui/tests') -Filter '*.test.mjs' | ForEach-Object { $_.FullName })
   Invoke-Checked 'node' (@('--test') + $WebTests)
@@ -58,9 +61,8 @@ Invoke-Checked $D8 @('--release', '--min-api', '31', '--lib', $AndroidJar, '--ou
 $DexJar = Join-Path $BuildRoot 'usblink-daemon.jar'
 Invoke-Checked 'jar' @('--create', '--file', $DexJar, '-C', $Dex, '.')
 Copy-Item (Join-Path $MobileRoot 'ksu/*') $Staging -Recurse -Force
-if ($ExperimentalUsb) {
+if ($UsbAdb) {
   Copy-Item (Join-Path $MobileRoot 'experimental/usbip/module.prop') (Join-Path $Staging 'module.prop')
-  Copy-Item (Join-Path $MobileRoot 'experimental/usbip/MODULE.md') (Join-Path $Staging 'EXPERIMENTAL.md')
 }
 New-Item -ItemType Directory (Join-Path $Staging 'lib') -Force | Out-Null
 Copy-Item $DexJar (Join-Path $Staging 'lib/usblink-daemon.jar')
@@ -76,7 +78,7 @@ Copy-Item (Join-Path $MobileRoot 'vendor/easytier/LICENSE*') (Join-Path $Staging
 Copy-Item (Join-Path $MobileRoot 'vendor/easytier/NOTICE.md') (Join-Path $Staging 'licenses/EasyTier-NOTICE.md')
 Copy-Item (Join-Path $MobileRoot 'vendor/easytier/manifest.json') (Join-Path $Staging 'licenses/EasyTier-manifest.json')
 Copy-Item (Join-Path $MobileRoot 'README.md') (Join-Path $Staging 'README.md')
-if ($ExperimentalUsb) { Copy-Item (Join-Path $MobileRoot 'experimental/usbip/MODULE.md') (Join-Path $Staging 'README.md') }
+if ($UsbAdb) { Copy-Item (Join-Path $MobileRoot 'experimental/usbip/MODULE.md') (Join-Path $Staging 'README.md') }
 Invoke-Checked 'node' @((Join-Path $RepoRoot 'node_modules/vite/bin/vite.js'), 'build', '--config', (Join-Path $MobileRoot 'webui/vite.config.mjs'))
 if (-not (Test-Path (Join-Path $MobileRoot 'webui/dist/index.html'))) { throw 'WebUI build is missing.' }
 New-Item -ItemType Directory (Join-Path $Staging 'webroot') -Force | Out-Null
@@ -92,7 +94,7 @@ $ReleaseRoot = Join-Path $RepoRoot 'release'
 New-Item -ItemType Directory $ReleaseRoot -Force | Out-Null
 $ModuleVersion = [regex]::Match([IO.File]::ReadAllText((Join-Path $Staging 'module.prop')), '(?m)^version=(\d+\.\d+\.\d+)\r?$').Groups[1].Value
 if ($ModuleVersion -notmatch '^\d+\.\d+\.\d+$') { throw 'Invalid module version.' }
-$Suffix = if ($ExperimentalUsb) { '-usb-adb-experimental' } else { '' }
+$Suffix = if ($UsbAdb) { '-usb-adb' } else { '' }
 $ZipPath = Join-Path $ReleaseRoot ("USBLink-Mobile-$ModuleVersion$Suffix-arm64.zip")
 $OutStream = [IO.File]::Open($ZipPath, [IO.FileMode]::Create)
 $Archive = New-Object IO.Compression.ZipArchive($OutStream, [IO.Compression.ZipArchiveMode]::Create, $false)

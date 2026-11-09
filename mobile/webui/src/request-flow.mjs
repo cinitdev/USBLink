@@ -5,7 +5,7 @@ export function isHistory(value) { return Array.isArray(value?.entries) && typeo
 
 export function pollDelay(status, failures = 0) {
   if (failures) return Math.min(15000, 2000 * 2 ** Math.min(failures - 1, 3));
-  return status?.adbRoot?.state === 'changing' || status?.sharing?.enabled || ['starting', 'waiting_system', 'waiting_network'].includes(status?.sharing?.state) || (status?.mesh?.configured && !status.mesh.running && !status.mesh.paused) ? 2000 : 5000;
+  return status?.sharing?.enabled || ['starting', 'waiting_system', 'waiting_network'].includes(status?.sharing?.state) || (status?.mesh?.configured && !status.mesh.running && !status.mesh.paused) ? 2000 : 5000;
 }
 
 // One read-only loop, also used after WebView resume. Generation fencing prevents

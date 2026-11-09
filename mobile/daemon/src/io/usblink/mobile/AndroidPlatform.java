@@ -16,7 +16,6 @@ import java.util.concurrent.TimeUnit;
 
 final class AndroidPlatform implements Platform {
     private final TcpAdb tcp;
-    private final AdbRoot adbRoot;
     private final String serial;
     private final DeviceNames names;
     private final SharingStartup startup;
@@ -56,21 +55,6 @@ final class AndroidPlatform implements Platform {
             public long elapsed(){return android.os.SystemClock.elapsedRealtime();}
             public void pause()throws IOException{try{Thread.sleep(100);}catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException("等待调试服务恢复已中断");}}
         });
-        adbRoot=new AdbRoot(state,new AdbRoot.SystemAccess(){
-            public String property(String name)throws IOException{return readProperty(name);}
-            public void rootProperty(String value)throws IOException{command("/system/bin/setprop","service.adb.root",value);}
-            public void restart()throws IOException{command("/system/bin/setprop","ctl.restart","adbd");}
-            public void beforeRestart()throws IOException{tcp.prepareRestart();}
-            public void requireAuthorization()throws IOException{
-                if(!property("ro.adb.secure").equals("1"))throw new IOException("系统 ADB 认证未启用，未切换权限；模块不会关闭认证");
-                if(!command("/system/bin/settings","get","global","adb_enabled").trim().equals("1"))throw new IOException("请先开启普通 USB 调试再切换 ADB Root");
-            }
-            public String bootId()throws IOException{return new String(Files.readAllBytes(Paths.get("/proc/sys/kernel/random/boot_id")),StandardCharsets.US_ASCII).trim();}
-            public AdbRoot.ProcessState process()throws IOException{return adbdProcess();}
-            public boolean ready()throws IOException{return property("sys.boot_completed").equals("1") && property("init.svc.adbd").equals("running");}
-            public long elapsed(){return android.os.SystemClock.elapsedRealtime();}
-            public void pause()throws IOException{try{Thread.sleep(100);}catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException("等待 ADB Root 恢复已中断");}}
-        });
     }
     @Override public Map<String,Object> device() {
         return Json.map("model",names.model,"name",names.deviceName,"modelCode",names.modelCode,"serial",serial,"androidVersion",Build.VERSION.RELEASE,"sdk",Build.VERSION.SDK_INT,"root",Process.myUid()==0);
@@ -81,48 +65,35 @@ final class AndroidPlatform implements Platform {
     public String sharingStartupProblem()throws IOException{return startup.pending();}
     public int maintainTcpPort()throws IOException{return tcp.maintainPort();}
     public void stopTcp()throws IOException{tcp.restore();}
-    public void tickAdbRoot(Runnable revoke){adbRoot.tick(revoke);}
-    public void setAdbRoot(boolean enabled,Runnable revoke)throws IOException{adbRoot.set(enabled,revoke);}
-    public Map<String,Object> adbRootStatus(){return adbRoot.status();}
-    public boolean adbRootChanging(){return adbRoot.changing();}
-    public boolean adbRootAllowsSharing(){return adbRoot.allowsSharing();}
-    public void restoreAdbRoot()throws IOException{adbRoot.restore();}
-    // app_process can use the system property reader without starting a subprocess per observation.
-    private static String readProperty(String name)throws IOException {
-        try{return (String)Class.forName("android.os.SystemProperties").getMethod("get",String.class).invoke(null,name);}
-        catch(ReflectiveOperationException | RuntimeException e){return command("/system/bin/getprop",name).trim();}
-    }
-    private static AdbRoot.ProcessState adbdProcess()throws IOException {
-        String pid=readProperty("init.svc_debug_pid.adbd");
-        if(pid.matches("[0-9]+") && !pid.equals("0")) {
-            try{return identifyAdbd(Paths.get("/proc",pid));}catch(IOException e){return null;}
-        }
-        AdbRoot.ProcessState found=null;
-        try(DirectoryStream<Path> processes=Files.newDirectoryStream(Paths.get("/proc"))) {
-            for(Path process:processes) {
-                if(!process.getFileName().toString().matches("[0-9]+"))continue;
-                AdbRoot.ProcessState candidate;
-                try{candidate=identifyAdbd(process);}catch(IOException ignored){continue;}
-                if(candidate!=null){if(found!=null)throw new IOException("发现多个系统 adbd，无法确认权限来源");found=candidate;}
-            }
-        }
-        return found;
-    }
-    private static AdbRoot.ProcessState identifyAdbd(Path process)throws IOException {
-        if(!new String(Files.readAllBytes(process.resolve("comm")),StandardCharsets.UTF_8).trim().equals("adbd"))return null;
+    // Confirm that the private TCP listener belongs to system adbd, regardless of
+    // whether the ROM or another tool supplies its privileges. Never change them.
+    private static boolean isSystemAdbd(Path process)throws IOException {
+        String name=new String(Files.readAllBytes(process.resolve("comm")),StandardCharsets.UTF_8).trim();
+        if(!name.equals("adbd") && !name.equals("adbd_real"))return false;
         boolean executable=false;
-        for(String path:new String[]{"/apex/com.android.adbd/bin/adbd","/system/bin/adbd"}) {
-            try{if(Files.isSameFile(process.resolve("exe"),Paths.get(path))){executable=true;break;}}catch(IOException ignored){}
+        for(String path:new String[]{"/apex/com.android.adbd/bin/adbd","/system/bin/adbd","/apex/com.android.adbd/bin/adbd_real","/system/bin/adbd_real"}) {
+            // Inspect in the process's namespace, not the module manager's isolated view.
+            Path candidate=process.resolve("root"+path);
+            try{if(Files.isSameFile(process.resolve("exe"),candidate)){executable=true;break;}}catch(IOException ignored){}
         }
-        if(!executable)return null;
+        if(!executable)return false;
         String context=new String(Files.readAllBytes(process.resolve("attr/current")),StandardCharsets.UTF_8).trim();
         String status=new String(Files.readAllBytes(process.resolve("status")),StandardCharsets.UTF_8);
         String stat=new String(Files.readAllBytes(process.resolve("stat")),StandardCharsets.US_ASCII);
-        return AdbdIdentity.parse(process.getFileName().toString(),status,stat,context);
+        if(!java.util.regex.Pattern.compile("(?m)^PPid:\\s+1\\s*$").matcher(status).find())return false;
+        return AdbdIdentity.matches(process.getFileName().toString(),status,stat,context);
     }
     @Override public void openDebugSettings() throws IOException {
         String output=command("/system/bin/am","start","--user","0","-a","android.settings.APPLICATION_DEVELOPMENT_SETTINGS");
         if(output.contains("Error:") || output.contains("Exception"))throw new IOException("无法打开开发者选项，请在系统设置中手动进入 USB 调试");
+    }
+    @Override public void requireUsbDebugging() throws IOException {
+        String value;
+        try { value=command("/system/bin/toybox","timeout","3","/system/bin/settings","get","global","adb_enabled").trim(); }
+        catch(IOException error) { throw new IOException("无法确认 USB 调试状态，未开启共享；请检查系统设置后重试"); }
+        if(value.equals("1"))return;
+        if(value.equals("0"))throw new IOException("请先在开发者选项开启 USB 调试，再开启共享");
+        throw new IOException("USB 调试状态未知，未开启共享；请确认系统设置后重试");
     }
     static String command(String... args) throws IOException {
         java.lang.Process child=new ProcessBuilder(args).redirectErrorStream(true).start();
@@ -131,7 +102,7 @@ final class AndroidPlatform implements Platform {
             try { byte[] b=new byte[1024];int n;while((n=child.getInputStream().read(b))!=-1) { if(out.size()+n<=8192)out.write(b,0,n); } }catch(IOException ignored){}
         },"usblink-command-output"); reader.setDaemon(true);reader.start();
         try {
-            if(!child.waitFor(5,TimeUnit.SECONDS)) {child.destroyForcibly();throw new IOException("系统命令超时");}
+            if(!child.waitFor(5,TimeUnit.SECONDS)) {child.destroyForcibly();throw new IOException("系统命令超时，操作结果需重新核验");}
             reader.join(500);
             if(child.exitValue()!=0)throw new IOException("系统拒绝了操作，请检查模块 Root 权限");
             return new String(out.toByteArray(),StandardCharsets.UTF_8);
@@ -158,7 +129,7 @@ final class AndroidPlatform implements Platform {
             for(Path process:processes) {
                 if(!process.getFileName().toString().matches("[0-9]+"))continue;
                 try {
-                    if(identifyAdbd(process)==null)continue;
+                    if(!isSystemAdbd(process))continue;
                     try(DirectoryStream<Path> descriptors=Files.newDirectoryStream(process.resolve("fd"))) {
                         for(Path descriptor:descriptors) {
                             try {inodes.remove(Files.readSymbolicLink(descriptor).toString());}

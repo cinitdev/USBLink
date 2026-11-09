@@ -13,6 +13,7 @@ const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 await fs.mkdir(path.join(root, 'build'), { recursive: true });
 const temp = await fs.mkdtemp(path.join(root, 'build', 'managers-test-'));
 const dir = posix(temp);
+await fs.mkdir(path.join(temp, 'module'));
 const installer = (await fs.readFile(path.join(root, 'ksu/customize.sh'), 'utf8')).replaceAll('\r\n', '\n');
 const installerPath = path.join(temp, 'customize.sh');
 await fs.writeFile(installerPath, installer);
