@@ -16,20 +16,29 @@ export function adbConnectCommand(peer) {
   return `adb connect ${peer.ip}:3242`;
 }
 
-export function mergePeerPresence(previous, incoming, { configured, running, sameNetwork, problem }) {
+export function mergePeerPresence(previous, incoming, { configured, running, sameNetwork, problem, peersKnown = running, localIp }) {
   if (!configured) return [];
-  const current = new Map((sameNetwork ? previous : []).map(peer => [peer.ip, {
+  const remembered = new Map((sameNetwork ? previous : []).map(peer => [peer.ip, peer]));
+  // Fresh discovery is a membership snapshot, not an append-only address book.
+  // Keep old rows only when discovery fails. Driver mounts are managed separately.
+  const current = new Map((sameNetwork && !peersKnown ? previous : []).filter(peer => peer.ip !== localIp).map(peer => [peer.ip, {
     ...peer, online: false, usbReady: false, adbReady: false, adbState: 'unavailable', latency: "-",
     problem: problem || "对方 USBLink 未运行或已离开当前连接，等待对方打开程序",
   }]));
-  for (const peer of incoming || []) current.set(peer.ip, running ? {
+  for (const peer of incoming || []) {
+    if (!peer.ip || peer.ip === localIp) continue;
+    const old = remembered.get(peer.ip);
+    // An address or model name cannot identify a device after DHCP reassignment.
+    const sameNode = !!peer.peerId && peer.peerId === old?.peerId;
+    current.set(peer.ip, running ? {
     ...peer,
     // Retain the last authenticated kind only as an offline display hint on this network.
-    os: !peer.online && peer.os === 'unknown' ? current.get(peer.ip)?.os || 'unknown' : peer.os,
-    usbKind: !peer.online && peer.os === 'unknown' ? current.get(peer.ip)?.usbKind || 'usbip' : peer.usbKind,
+    os: !peer.online && peer.os === 'unknown' && sameNode ? old.os : peer.os,
+    usbKind: !peer.online && peer.os === 'unknown' && sameNode ? old.usbKind : peer.usbKind,
   } : {
     ...peer, online: false, usbReady: false, adbReady: false, adbState: 'unavailable', latency: "-", problem: problem || "本机网络未就绪，对方在线状态待确认",
-  });
+    });
+  }
   return [...current.values()];
 }
 

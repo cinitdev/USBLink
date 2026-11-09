@@ -2,7 +2,7 @@ import test from "node:test";
 import assert from "node:assert/strict";
 import { canUsePeer, mergePeerPresence, mountPresence, peerStatusLabel, adbConnectCommand } from "./peer-state.mjs";
 
-const peer = { ip: "10.0.0.2", name: "HOST", online: true, usbReady: true, latency: "4" };
+const peer = { ip: "10.0.0.2", peerId: "100", name: "HOST", online: true, usbReady: true, latency: "4" };
 const network = { configured: true, running: true, sameNetwork: true };
 
 test('experimental USB phones use the existing USB flow only while authenticated and ready', () => {
@@ -29,7 +29,7 @@ test('authenticated Android capability is independent of USB/IP and sharing pref
   assert.equal(adbConnectCommand({ ...ready, ip: '10.0.0.2;shutdown' }), '');
   assert.equal(adbConnectCommand({ ...ready, ip: '999.0.0.2' }), '');
   assert.equal(adbConnectCommand({ ...peer, name: 'USBLink-Android' }), '', 'Hostname alone never enables ADB capability');
-  const [lost] = mergePeerPresence([ready], [], network);
+  const [lost] = mergePeerPresence([ready], [], { ...network, peersKnown: false });
   assert.equal(lost.adbReady, false);
   assert.equal(adbConnectCommand(lost), '');
   const [localOffline] = mergePeerPresence([ready], [ready], { ...network, running: false });
@@ -43,7 +43,7 @@ test('authenticated Android capability is independent of USB/IP and sharing pref
 });
 
 test("pairing and a remembered peer do not establish online presence", () => {
-  const [offline] = mergePeerPresence([peer], [], network);
+  const [offline] = mergePeerPresence([peer], [], { ...network, peersKnown: false });
   assert.equal(offline.name, peer.name);
   assert.equal(offline.online, false);
   assert.equal(canUsePeer(offline), false);
@@ -68,4 +68,19 @@ test("a driver mount record cannot make an offline computer look connected", () 
   assert.equal(mountPresence(device, [{ ...peer, usbReady: false }], true), "共享服务不可达");
   assert.equal(mountPresence(device, [peer], false), "对方状态待确认");
   assert.equal(mountPresence(device, [], true), "对方状态待确认");
+});
+
+test('fresh discovery removes old K70 addresses, preserves distinct same-model nodes and excludes self', () => {
+  const phone = { ...peer, name: 'Redmi K70', os: 'android', usbKind: 'android-adb-experimental' };
+  const old = { ...phone, ip: '10.0.0.5', peerId: 'old' };
+  const other = { ...phone, ip: '10.0.0.3', peerId: 'another' };
+  const self = { ...peer, ip: '10.0.0.4', peerId: 'self' };
+  const fresh = mergePeerPresence([old, phone, self], [phone, other, self], { ...network, localIp: self.ip, peersKnown: true });
+  assert.deepEqual(fresh.map(row => row.ip), [phone.ip, other.ip]);
+  assert.deepEqual(mergePeerPresence([old], [], { ...network, peersKnown: true }), []);
+  for (const peerId of ['changed', undefined]) {
+    const [reassigned] = mergePeerPresence([phone], [{ ...peer, peerId, os: 'unknown', online: false, usbKind: 'usbip' }], network);
+    assert.equal(reassigned.os, 'unknown');
+    assert.equal(reassigned.usbKind, 'usbip');
+  }
 });

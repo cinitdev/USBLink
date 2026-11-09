@@ -30,14 +30,15 @@ test('switching sources never carries another phone export or selection identity
   assert.ok(networkDeviceRows(previewNetworkPeers(12), remaining).filter((_, index) => index !== 7).every(row => row.mountedCount === 1));
 });
 
-test('offline sources stay visible without retaining readiness or deleting local mounts', () => {
+test('current offline sources stay visible, departed addresses disappear without deleting driver mounts', () => {
   const peers = previewNetworkPeers(40);
-  const fresh = peers.filter((_, index) => index % 2 === 0);
+  const fresh = peers.filter((_, index) => index % 2 === 0).map((row, index) => index === 1 ? { ...row, online: false } : row);
   const remembered = mergePeerPresence(peers, fresh, { configured: true, running: true, sameNetwork: true });
-  assert.equal(remembered.length, 40);
+  assert.equal(remembered.length, 20);
   assert.equal(remembered[1].online, false);
   const mounts = [{ host: peers[1].ip, busId: '99-1', vidPid: '18d1:4ee7', port: 1 }];
-  assert.equal(networkDeviceRows(remembered, mounts)[1].mountedCount, 1);
+  assert.ok(networkDeviceRows(remembered, mounts).every(row => row.mountedCount === 0));
+  assert.equal(mounts.length, 1, 'Mounts are managed independently of discovery');
   assert.deepEqual(mergePeerPresence(peers, [], { configured: true, running: true, sameNetwork: false }), []);
 });
 

@@ -87,6 +87,12 @@ fn handle_connection(mut stream: TcpStream) -> Result<(), String> {
         .map_err(|e| e.to_string())?;
     let mut magic = [0; 8];
     stream.read_exact(&mut magic).map_err(|e| e.to_string())?;
+    if &magic == crate::presence::OWNER_MAGIC {
+        if let Some(key) = crate::mesh::presence_token()? {
+            return crate::presence::respond_owner(&mut stream, &key);
+        }
+        return Ok(());
+    }
     if &magic == crate::presence::MAGIC {
         if let Some(key) = crate::mesh::presence_token()? {
             return crate::presence::respond(&mut stream, &key, crate::presence::Phase::current);

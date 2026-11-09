@@ -6,8 +6,11 @@ use std::time::Duration;
 use uuid::Uuid;
 
 pub(crate) const MAGIC: &[u8; 8] = b"USBLINK3";
+pub(crate) const OWNER_MAGIC: &[u8; 8] = b"USBLINK5";
 const REQUEST: &[u8] = b"USBLink presence request v1\0";
 const RESPONSE: &[u8] = b"USBLink presence response v1\0";
+const OWNER_REQUEST: &[u8] = b"USBLink desktop owner request v1\0";
+const OWNER_RESPONSE: &[u8] = b"USBLink desktop owner response v1\0";
 type Auth = Hmac<Sha256>;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -51,17 +54,38 @@ pub(crate) fn respond(
     key: &[u8; 32],
     phase: impl FnOnce() -> Phase,
 ) -> Result<(), String> {
+    respond_payload(stream, key, REQUEST, RESPONSE, || vec![phase() as u8])
+}
+
+// Process lifetime, not a hostname/IP or persisted profile identity. The single
+// instance lock prevents a replacement process becoming Ready before cleanup.
+pub(crate) fn respond_owner(stream: &mut TcpStream, key: &[u8; 32]) -> Result<(), String> {
+    static INSTANCE: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
+    respond_payload(stream, key, OWNER_REQUEST, OWNER_RESPONSE, || {
+        let mut payload = INSTANCE.get_or_init(|| *Uuid::new_v4().as_bytes()).to_vec();
+        payload.push(Phase::current() as u8);
+        payload
+    })
+}
+
+fn respond_payload(
+    stream: &mut TcpStream,
+    key: &[u8; 32],
+    request: &[u8],
+    response: &[u8],
+    payload: impl FnOnce() -> Vec<u8>,
+) -> Result<(), String> {
     let mut nonce = [0; 16];
     let mut tag = [0; 32];
     stream
         .read_exact(&mut nonce)
         .and_then(|_| stream.read_exact(&mut tag))
         .map_err(|e| e.to_string())?;
-    authenticator(key, REQUEST, &nonce, &[])
+    authenticator(key, request, &nonce, &[])
         .verify_slice(&tag)
         .map_err(|_| "会话请求认证失败".to_string())?;
-    let payload = [phase() as u8];
-    let tag = authenticator(key, RESPONSE, &nonce, &payload)
+    let payload = payload();
+    let tag = authenticator(key, response, &nonce, &payload)
         .finalize()
         .into_bytes();
     stream
@@ -192,6 +216,74 @@ mod tests {
             Some(Phase::AndroidReady)
         );
         assert_eq!(verify_response(&key, &nonce, 1, &tag), None);
+    }
+
+    #[test]
+    fn desktop_owner_is_process_scoped_and_nonce_bound() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for _ in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut magic = [0; 8];
+                stream.read_exact(&mut magic).unwrap();
+                assert_eq!(&magic, OWNER_MAGIC);
+                let _ = respond_owner(&mut stream, &[7; 32]);
+            }
+        });
+        let mut previous = None;
+        for request in 0..3 {
+            let nonce = *Uuid::new_v4().as_bytes();
+            let key = if request == 2 { [8; 32] } else { [7; 32] };
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            stream.write_all(OWNER_MAGIC).unwrap();
+            stream.write_all(&nonce).unwrap();
+            stream.write_all(&authenticator(&key, OWNER_REQUEST, &nonce, &[]).finalize().into_bytes()).unwrap();
+            let mut payload = [0; 17];
+            if request == 2 {
+                assert!(stream.read_exact(&mut payload).is_err(), "Wrong key must not get an owner");
+                continue;
+            }
+            let mut tag = [0; 32];
+            stream.read_exact(&mut payload).unwrap();
+            stream.read_exact(&mut tag).unwrap();
+            assert!(authenticator(&key, OWNER_RESPONSE, &nonce, &payload).verify_slice(&tag).is_ok());
+            assert!(authenticator(&key, OWNER_RESPONSE, &[0; 16], &payload).verify_slice(&tag).is_err());
+            assert_ne!(&payload[..16], &[0; 16]);
+            if let Some(old) = previous { assert_eq!(&payload[..16], old); }
+            previous = Some(payload[..16].to_vec());
+        }
+        server.join().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires compiled experimental module host classes"]
+    fn desktop_owner_java_interoperability() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(8);
+            while std::time::Instant::now() < deadline {
+                if let Ok((mut stream, _)) = listener.accept() {
+                    stream.set_nonblocking(false).unwrap();
+                    stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    let mut magic = [0; 8]; stream.read_exact(&mut magic).unwrap();
+                    assert_eq!(&magic, OWNER_MAGIC);
+                    return respond_owner(&mut stream, &[7; 32]);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err("Java did not connect".into())
+        });
+        let classes = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../mobile/build/usb-module/test-classes");
+        let output = std::process::Command::new("java")
+            .args(["-cp", classes.to_str().unwrap(), "io.usblink.mobile.DesktopOwnerTestMain", "--query", &port.to_string()])
+            .output().unwrap();
+        server.join().unwrap().unwrap();
+        assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
     }
 
     #[test]

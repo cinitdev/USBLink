@@ -79,6 +79,7 @@ pub(crate) struct MeshProfile {
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct MeshPeer {
+    pub peer_id: Option<String>,
     pub name: String,
     pub ip: String,
     pub online: bool,
@@ -102,6 +103,7 @@ pub struct MeshStatus {
     pub relay: String,
     pub peer_count: usize,
     pub peers: Vec<MeshPeer>,
+    pub peers_known: bool,
     pub pairing_code: Option<String>,
     pub problem: Option<String>,
     pub needs_repair: bool,
@@ -606,6 +608,7 @@ fn parse_peers(values: &[Value]) -> (Option<String>, Vec<MeshPeer>, bool) {
             continue;
         }
         peers.push(MeshPeer {
+            peer_id: item.get("id").and_then(Value::as_str).filter(|id| !id.is_empty()).map(str::to_string),
             name,
             ip,
             online: false,
@@ -687,6 +690,7 @@ pub fn status(include_code: bool) -> Result<MeshStatus, String> {
             relay: DEFAULT_RELAY.into(),
             peer_count: 0,
             peers: vec![],
+            peers_known: true,
             pairing_code: None,
             problem: None,
             needs_repair: false,
@@ -714,6 +718,7 @@ pub fn status(include_code: bool) -> Result<MeshStatus, String> {
         relay: profile.relay.clone(),
         peer_count: peers.iter().filter(|peer| peer.online).count(),
         peers,
+        peers_known: service_responding,
         pairing_code: if include_code {
             Some(encode_profile(&profile)?)
         } else {
@@ -733,6 +738,7 @@ fn starting_status(profile: &MeshProfile, pairing_code: Option<String>) -> MeshS
         relay: profile.relay.clone(),
         peer_count: 0,
         peers: vec![],
+        peers_known: false,
         pairing_code,
         problem: None,
         needs_repair: false,
@@ -859,12 +865,13 @@ mod tests {
         let values = serde_json::json!([
             {"ipv4":"10.0.0.1","hostname":"DESKTOP","cost":"Local","lat_ms":"-","tunnel_proto":"-"},
             {"ipv4":"","hostname":"PublicServer_a","cost":"p2p","lat_ms":"22.0","tunnel_proto":"tcp"},
-            {"ipv4":"10.0.0.2","hostname":"OFFICE-PC","cost":"p2p","lat_ms":"3.5","tunnel_proto":"udp"}
+            {"id":"1461209807","ipv4":"10.0.0.2","hostname":"OFFICE-PC","cost":"p2p","lat_ms":"3.5","tunnel_proto":"udp"}
         ]);
         let (local, peers, relay_connected) = parse_peers(values.as_array().unwrap());
         assert_eq!(local.as_deref(), Some("10.0.0.1"));
         assert_eq!(peers.len(), 1);
         assert_eq!(peers[0].name, "OFFICE-PC");
+        assert_eq!(peers[0].peer_id.as_deref(), Some("1461209807"));
         assert!(!peers[0].online, "discovery alone cannot confirm presence");
         assert!(!peers[0].usb_ready);
         assert!(relay_connected);
