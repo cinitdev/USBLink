@@ -16,7 +16,7 @@ const quote = value => "'" + value.replaceAll("'", "'\\''") + "'";
 const original = (await fs.readFile(path.join(root, 'ksu/action.sh'), 'utf8')).replaceAll('\r\n', '\n');
 const startupCommand = '/system/bin/sh "$MODDIR/bin/supervise.sh" "$MODDIR" >/dev/null 2>&1 &';
 assert.equal(original.split(startupCommand).length, 2, 'The real supervisor launch must be replaced exactly once before executing a fixture');
-assert.ok(original.includes('/data/adb/usblink/startup.error'), 'Startup error path must be redirected into the fixture');
+assert.ok(original.includes('state_live startup.error'), 'Startup errors use the resolved state path');
 await fs.mkdir(path.join(root, 'build'), { recursive: true });
 
 const scenarios = [
@@ -48,6 +48,7 @@ for (const scenario of scenarios) {
   }
 
   const common = `STATE=${quote(state)}
+state_live() { printf '%s/%s\\n' "$STATE" "$1"; }
 BUSYBOX=fake_busybox
 find_flock() {
   echo flock >> "$STATE/order"
@@ -79,8 +80,7 @@ fake_busybox() {
 }
 `;
   await fs.writeFile(path.join(temp, 'module/bin/common.sh'), common);
-  const script = original.replace('#!/system/bin/sh', '#!/bin/sh').replace(startupCommand, 'start_supervisor')
-    .replaceAll('/data/adb/usblink/startup.error', state + '/startup.error');
+  const script = original.replace('#!/system/bin/sh', '#!/bin/sh').replace(startupCommand, 'start_supervisor');
   assert.ok(!script.includes('/system/bin/'), 'Fixture must contain no Android executable path');
   assert.ok(!script.includes('/data/adb/'), 'Fixture must contain no real module/data path');
   await fs.writeFile(path.join(temp, 'module/action.sh'), script);

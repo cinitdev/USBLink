@@ -6,7 +6,7 @@ import java.util.*;
 public final class TcpAdbTestMain {
     private static int checks;
     public static void main(String[] args)throws Exception {
-        lifecycle();failureRecovery();conflicts();firewall();firewallMaintenance();
+        lifecycle();stoppedService();failureRecovery();conflicts();firewall();firewallMaintenance();
         System.out.println("PASS: "+checks+" system adbd TCP safety checks");
     }
     static void check(boolean value,String message){checks++;if(!value)throw new AssertionError(message);}
@@ -43,6 +43,52 @@ public final class TcpAdbTestMain {
         system.keepListening=false;tcp.restore();check(!system.guard,"Retry cleanup succeeds");
         tcp.start();system.boot="22222222-2222-2222-2222-222222222222";system.tcp="7777";system.listening=false;int before=system.restarts;tcp.restore();
         check(system.tcp.equals("7777") && system.restarts==before,"New boot never replays stale service property");
+    }
+    static void stoppedService()throws Exception {
+        FakeSystem system=new FakeSystem();Path path=dir();system.path=path;system.service="stopped";system.delay=true;
+        TcpAdb tcp=new TcpAdb(path,system);tcp.start();
+        check(system.events.equals(Arrays.asList("protect","set:15558","restart")),"Stopped adbd starts once after protected port is ready");
+        for(int i=0;i<3;i++)check(tcp.port()==0,"No ready state until owned listener exists");
+        check(system.restarts==1,"Pending confirmations never replay start");
+        system.listening=true;check(tcp.port()==15558,"Cold start accepts confirmed system listener");
+        system.events.clear();new TcpAdb(path,system).restore();
+        check(system.events.equals(Arrays.asList("protect","stop","set:","unprotect")),"Crash cleanup stops cold-started service before restoring port");
+        check(system.service.equals("stopped") && system.tcp.isEmpty() && !system.guard,"Cold start restores original stopped state");
+        system.delay=false;tcp.start();tcp.restore();check(system.service.equals("stopped"),"Sharing can enable and disable again without phone reboot");
+
+        for(String failure:Arrays.asList("guard","property","restart")) {
+            system=new FakeSystem();path=dir();system.path=path;system.service="stopped";system.fail=failure;tcp=new TcpAdb(path,system);
+            reject(tcp::start,"Cold start failure at "+failure);system.fail="";tcp.restore();
+            check(system.service.equals("stopped") && system.restarts==0 && !system.guard && !Files.exists(path.resolve("adbd-tcp.json")),"Cold start failure does not activate ordinary adbd during rollback");
+        }
+        system=new FakeSystem();path=dir();system.path=path;system.service="stopped";tcp=new TcpAdb(path,system);tcp.start();
+        system.fail="stop";reject(tcp::restore,"Stop rejection is visible");
+        check(system.tcp.equals("15558") && system.guard && Files.exists(path.resolve("adbd-tcp.json")),"Rejected stop keeps protected port and recovery journal");
+        system.fail="";system.keepListening=true;reject(tcp::restore,"Stop must be confirmed");
+        check(system.tcp.equals("15558") && system.guard,"Stuck service never falls back to an unprotected original port");
+        system.keepListening=false;tcp.restore();
+
+        system=new FakeSystem();path=dir();system.path=path;system.service="stopped";tcp=new TcpAdb(path,system);tcp.start();
+        system.tcp="8888";reject(tcp::restore,"Cold start cleanup preserves external port changes");
+        check(system.stops==0 && system.guard,"External conflict never stops another owner's service");system.tcp="15558";tcp.restore();
+        system.service="stopped";tcp.start();system.boot="22222222-2222-2222-2222-222222222222";system.tcp="7777";system.listening=false;
+        int before=system.stops;tcp.restore();check(system.tcp.equals("7777") && system.stops==before,"Old cold-start journal does not stop a later boot's service");
+
+        for(String state:Arrays.asList("stopping","restarting","","unknown")) {
+            system=new FakeSystem();path=dir();system.path=path;system.service=state;tcp=new TcpAdb(path,system);
+            try{tcp.start();throw new AssertionError("Uncertain service accepted");}
+            catch(IOException e){check(!e.getMessage().contains("请先在开发者选项开启"),"Service-state error does not falsely report debugging off");}
+            check(system.events.isEmpty() && !Files.exists(path.resolve("adbd-tcp.json")),"Uncertain service is not changed");
+        }
+        system=new FakeSystem();path=dir();system.path=path;system.service="stopped";system.delay=true;tcp=new TcpAdb(path,system);tcp.start();
+        system.now=11_000;system.service="stopped";
+        try{tcp.port();throw new AssertionError("Failed cold start accepted");}
+        catch(IOException e){check(e.getMessage().contains("仍为停止状态"),"Cold start timeout names actual stopped state");}
+        check(system.restarts==1,"Timeout never retries");tcp.restore();
+
+        system=new FakeSystem();path=dir();system.path=path;system.tcp="15558";system.guard=true;system.listening=true;
+        Files.writeString(path.resolve("adbd-tcp.json"),Json.stringify(Json.map("version",1,"boot",system.boot,"original","","persistent","")));
+        new TcpAdb(path,system).restore();check(system.restarts==1 && system.stops==0,"Legacy running-service journal still restores normally");
     }
     static void conflicts()throws Exception {
         FakeSystem system=new FakeSystem();Path path=dir();system.path=path;TcpAdb tcp=new TcpAdb(path,system);
@@ -96,11 +142,12 @@ public final class TcpAdbTestMain {
         tcp.restore();check(runner.rules.isEmpty(),"All exact owned duplicates removed on stop");
     }
     static final class FakeSystem implements TcpAdb.SystemAccess {
-        Path path;String tcp="",persistent="",address="",boot="11111111-1111-1111-1111-111111111111",fail="";
-        boolean auth=true,guard,listening,delay,keepListening,changePersistentOnProtect,foreign;int restarts;long now;List<String> events=new ArrayList<>();TcpFirewall firewall;
-        public String property(String name){switch(name){case "service.adb.tcp.port":return tcp;case "persist.adb.tcp.port":return persistent;case "service.adb.listen_addrs":return address;case "init.svc.adbd":return "running";default:return "";}}
+        Path path;String tcp="",persistent="",address="",service="running",boot="11111111-1111-1111-1111-111111111111",fail="";
+        boolean auth=true,guard,listening,delay,keepListening,changePersistentOnProtect,foreign;int restarts,stops;long now;List<String> events=new ArrayList<>();TcpFirewall firewall;
+        public String property(String name){switch(name){case "service.adb.tcp.port":return tcp;case "persist.adb.tcp.port":return persistent;case "service.adb.listen_addrs":return address;case "init.svc.adbd":return service;default:return "";}}
         public void tcpProperty(String value)throws IOException{check(Files.exists(path.resolve("adbd-tcp.json")),"Journal durable before property changes");if(fail.equals("property"))throw new IOException("模拟属性失败");events.add("set:"+value);tcp=value;}
-        public void restart()throws IOException{if(fail.equals("restart"))throw new IOException("模拟重启失败");check(guard,"Never restart without guard");events.add("restart");restarts++;if(!keepListening)listening=tcp.equals("15558")&&!delay;}
+        public void restart()throws IOException{if(fail.equals("restart"))throw new IOException("模拟重启失败");check(guard,"Never restart without guard");events.add("restart");restarts++;service="running";if(!keepListening)listening=tcp.equals("15558")&&!delay;}
+        public void stop()throws IOException{if(fail.equals("stop"))throw new IOException("模拟停止失败");check(guard,"Never stop without guard");events.add("stop");stops++;if(!keepListening){service="stopped";listening=false;}}
         public boolean listening(int port){return listening;}
         public boolean ownedListener(int port){return listening && !foreign;}
         public void protect()throws IOException{if(fail.equals("guard"))throw new IOException("模拟防护失败");events.add("protect");guard=true;if(changePersistentOnProtect)persistent="6666";}

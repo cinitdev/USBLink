@@ -31,6 +31,7 @@ public final class OwnerLifecycleTest {
         catch(SocketException e){check(true,"Old socket is reset");}
     }
     public static void main(String[] args)throws Exception {
+        transportLoss(false);transportLoss(true);
         AtomicReference<UsbIpServer.Owner> observation=new AtomicReference<>(owner(1,1));
         AtomicReference<String> reason=new AtomicReference<>();
         try(ServerSocket backend=new ServerSocket(0,4,LOCAL);
@@ -71,5 +72,50 @@ public final class OwnerLifecycleTest {
             }
         }
         System.out.println("PASS: "+checks+" desktop replacement lifecycle checks");
+    }
+    private static void transportLoss(boolean initiallyUnknown)throws Exception {
+        AtomicReference<UsbIpServer.Owner> observation=new AtomicReference<>(initiallyUnknown?null:owner(1,1));
+        AtomicReference<String> reason=new AtomicReference<>();
+        AtomicInteger targetConnections=new AtomicInteger();
+        AtomicInteger oldPort=new AtomicInteger();
+        byte[] identity=new byte[16];identity[0]=1;
+        try(ServerSocket backend=new ServerSocket(0,4,LOCAL);
+            UsbIpServer server=new UsbIpServer(LOCAL,0,peer->true,
+                new AdbUsbDevice("network-loss","Test Phone",UUID.randomUUID().toString()),
+                ()->{targetConnections.incrementAndGet();return new Socket(LOCAL,backend.getLocalPort());},line->{},
+                event->reason.set(event.get("code").toString()),peer->bytes->{},(peer,local,clientPort,serverPort)->{
+                    check(local.equals(LOCAL),"Owner observation uses the accepted USB socket's local address");
+                    // Only the old four-tuple has disappeared; another/new import is live.
+                    if(oldPort.get()==0)oldPort.compareAndSet(0,clientPort);
+                    return clientPort==oldPort.get()?observation.get():new UsbIpServer.Owner(identity,1,1);
+                });
+            Socket old=request(server.port(),true);Socket oldBackend=backend.accept()) {
+            long until=System.nanoTime()+1_000_000_000L;
+            while(server.sessions().isEmpty() && System.nanoTime()<until)Thread.sleep(5);
+            String original=server.sessions().get(0).get("id").toString();
+            for(UsbIpServer.Owner current:new UsbIpServer.Owner[]{null,new UsbIpServer.Owner(identity,1,0),
+                    new UsbIpServer.Owner(identity,1,1),new UsbIpServer.Owner(identity,0,2),new UsbIpServer.Owner(identity,3,2)}) {
+                observation.set(current);
+                try(Socket rejected=request(server.port(),false)) {
+                    check(server.sessions().get(0).get("id").equals(original),"Unknown, present or unready observations preserve the mount");
+                }
+            }
+            check(targetConnections.get()==1,"Rejected imports do not reconnect to adbd");
+            observation.set(new UsbIpServer.Owner(identity,1,2));
+            if(initiallyUnknown) {
+                until=System.nanoTime()+8_000_000_000L;
+                while(!server.sessions().isEmpty() && System.nanoTime()<until)Thread.sleep(10);
+                check(server.sessions().isEmpty(),"Background cleanup works after an initially failed owner query");
+                check(targetConnections.get()==1,"Background cleanup never reattaches");
+            }
+            try(Socket next=request(server.port(),true);Socket nextBackend=backend.accept()) {
+                closed(old);closed(oldBackend);
+                check("CLIENT_TRANSPORT_GONE".equals(reason.get()),"Same app records the confirmed old transport loss");
+                check(targetConnections.get()==2,"One manual import creates exactly one replacement backend");
+                check(server.active(),"Network, sharing listener and pairing can remain active");
+                try(Socket rejected=request(server.port(),false)){}
+                check(targetConnections.get()==2,"Late old observations cannot clear the replacement");
+            }
+        }
     }
 }

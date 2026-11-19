@@ -19,14 +19,16 @@ while [ "$attempt" -lt 10 ]; do
   sleep 1
   attempt=$((attempt+1))
 done
-if [ -s /data/adb/usblink/startup.error ]; then
-  cat /data/adb/usblink/startup.error
+ERROR_FILE=$(state_live startup.error)
+if [ -s "$ERROR_FILE" ]; then
+  cat "$ERROR_FILE"
   exit 1
 fi
 echo "USBLink 控制服务未能就绪，启动未确认，请查看以下模块错误后重试："
 printf '%s\n' "$result"
-if [ -s "$STATE/daemon.log" ]; then
+DAEMON_LOG=$(state_live daemon.log)
+if [ -s "$DAEMON_LOG" ]; then
   # Print only the daemon's fixed JSON error, never arbitrary runtime/subprocess logs.
-  grep -F -m 1 '{"ok":false,' "$STATE/daemon.log"
+  grep -F -m 1 '{"ok":false,' "$DAEMON_LOG"
 fi
 exit 1

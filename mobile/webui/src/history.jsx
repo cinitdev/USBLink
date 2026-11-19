@@ -1,4 +1,4 @@
-import React, { memo, useEffect, useMemo, useRef, useState } from 'react';
+import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { History24Regular, Search20Regular, Dismiss20Regular, Delete20Regular, Code20Regular, Apps20Regular, Folder20Regular, Info20Regular, Desktop24Regular, ChevronRight20Regular } from '@fluentui/react-icons';
 import { HISTORY_PAGE_SIZE, readHistoryPage, historyFilters as filters, historyCategory, historyLabel, historyCommand, historyCommandFamily, historyResultLabel } from './history-model.mjs';
 
@@ -23,8 +23,24 @@ function dateInfo(at) {
   return { day, key, time: dateFormats.time.format(date), full: dateFormats.full.format(date), iso: date.toISOString() };
 }
 
-const HistoryRecord = memo(function HistoryRecord({ item }) {
+const HistoryRecord = memo(function HistoryRecord({ item, epoch, loadDetail }) {
   const [expanded, setExpanded] = useState(false);
+  const [detail, setDetail] = useState(null);
+  const [detailError, setDetailError] = useState('');
+  const [retry, setRetry] = useState(0);
+  const detailKey = `${epoch}|${item.id}|${item.version ?? 0}`;
+  const record = !item.partial ? item : detail?.key === detailKey ? detail.entry : null;
+  useEffect(() => {
+    if (!expanded || !item.partial) return;
+    let active = true;
+    setDetailError('');
+    void loadDetail(item.id, epoch).then(entry => {
+      if (!active) return;
+      if (!entry || entry.id !== item.id || (entry.version ?? 0) < (item.version ?? 0)) throw new Error();
+      setDetail({ key: detailKey, entry });
+    }).catch(() => { if (active) setDetailError('详情暂时无法读取，请重试。'); });
+    return () => { active = false; };
+  }, [expanded, detailKey, item.partial, loadDetail, retry]);
   const stamp = dateInfo(item.at);
   const Icon = icons[historyCategory(item)] || Info20Regular;
   const command = historyCommand(item);
@@ -40,27 +56,27 @@ const HistoryRecord = memo(function HistoryRecord({ item }) {
           <span className="history-record-source"><Desktop24Regular aria-hidden="true" /><span>{item.peer || '来源未知'}</span><span className="history-detail-hint">详情<ChevronRight20Regular aria-hidden="true" /></span></span>
         </span>
       </summary>
-      {expanded && <div className="history-record-body">
+      {expanded && !record && <div className="history-record-body" role="status"><p>{detailError || '正在读取这条记录的详情…'}</p>{detailError && <button className="text-button" onClick={() => setRetry(value => value + 1)}>重试</button>}</div>}
+      {expanded && record && <div className="history-record-body">
         <div className="history-request-status">{item.kind === 'unparsed' ? '记录未完整解析' : historyResultLabel(item)}</div>
-        {command !== item.command && <><p>按设备端请求整理的 ADB 等效表达，并非电脑原始命令：</p><code dir="auto">{command}</code></>}
-        <p>设备实际收到的请求（敏感字段已隐藏）：</p><code dir="auto">{item.command}</code>
+        <p>ADB 命令（按手机实际收到的内容整理，敏感字段已隐藏）：</p><code dir="auto">{historyCommand(record)}</code>
         {family && <p>这是应用操作的一个请求阶段。下方是该阶段的手机返回内容；电脑端 APK 路径、选择设备参数和原始调用方式不可见。</p>}
         {['push', 'pull'].includes(item.kind) && <p>仅可看到手机端路径，电脑端路径不可见；占位文字不可直接执行。</p>}
         <div className="history-result">
           <h4>手机返回</h4>
-          {item.response?.stdout && <><p>标准输出／返回文本</p><code dir="auto">{item.response.stdout}</code></>}
-          {item.response?.stderr && <><p>错误输出</p><code className="history-result-error" dir="auto">{item.response.stderr}</code></>}
-          {!item.response?.stdout && !item.response?.stderr && <p>{!item.response ? '此记录创建时尚未采集返回内容，无法补录。' : item.response.binary ? '检测到二进制返回，不保存内容。' : item.response.state === 'pending' ? '尚未收到可显示的文本。' : '未收到可显示的文本；不代表命令执行成功。'}</p>}
-          {item.response?.note && <p>{item.response.note}</p>}
-          {item.response?.truncated && <p className="history-output-notice">输出超过 {Math.round((item.response.limit || 4096) / 1024)} KiB，仅保留开头部分，已截断。</p>}
+          {record.response?.stdout && <><p>标准输出／返回文本</p><code dir="auto">{record.response.stdout}</code></>}
+          {record.response?.stderr && <><p>错误输出</p><code className="history-result-error" dir="auto">{record.response.stderr}</code></>}
+          {!record.response?.stdout && !record.response?.stderr && <p>{!record.response ? '此记录创建时尚未采集返回内容，无法补录。' : record.response.binary ? '检测到二进制返回，不保存内容。' : record.response.state === 'pending' ? '尚未收到可显示的文本。' : '未收到可显示的文本；不代表命令执行成功。'}</p>}
+          {record.response?.note && <p>{record.response.note}</p>}
+          {record.response?.truncated && <p className="history-output-notice">输出超过 {Math.round((record.response.limit || 4096) / 1024)} KiB，仅保留开头部分，已截断。</p>}
         </div>
         <time dateTime={stamp.iso}>{stamp.full}</time>
       </div>}
     </details>
   </li>;
-}, (previous, next) => previous.today === next.today && sameRecord(previous.item, next.item));
+}, (previous, next) => previous.today === next.today && previous.epoch === next.epoch && previous.loadDetail === next.loadDetail && sameRecord(previous.item, next.item));
 
-const HistoryStream = memo(function HistoryStream({ entries, today }) {
+const HistoryStream = memo(function HistoryStream({ entries, today, epoch, loadDetail }) {
   const groups = useMemo(() => {
     const result = [];
     for (const item of entries) {
@@ -71,7 +87,7 @@ const HistoryStream = memo(function HistoryStream({ entries, today }) {
     }
     return result;
   }, [entries, today]);
-  return <>{groups.map(group => <div className="history-day" key={group.key}><h3>{group.title}<span>{group.entries.length} 条</span></h3><ol>{group.entries.map(item => <HistoryRecord key={item.id} item={item} today={today} />)}</ol></div>)}</>;
+  return <>{groups.map(group => <div className="history-day" key={group.key}><h3>{group.title}<span>{group.entries.length} 条</span></h3><ol>{group.entries.map(item => <HistoryRecord key={item.id} item={item} today={today} epoch={epoch} loadDetail={loadDetail} />)}</ol></div>)}</>;
 });
 
 export function CommandHistory({ history, stale, disabled, run, busy }) {
@@ -88,6 +104,13 @@ export function CommandHistory({ history, stale, disabled, run, busy }) {
   context.current = { history, stale, disabled, busy, run, older, applied, loading };
   const epoch = useRef(history?.epoch);
   epoch.current = history?.epoch;
+  const loadDetail = useCallback(async (id, stamp) => {
+    const current = context.current;
+    if (current.stale || current.disabled || current.busy || current.history?.epoch !== stamp) throw new Error();
+    const result = await current.run('history', { id, epoch: stamp });
+    if (!result?.detail || result.epoch !== stamp || epoch.current !== stamp) throw new Error();
+    return result.entries?.[0];
+  }, []);
   useEffect(() => { sequence.current++; setLoading(false); setOlder(null); setConfirm(false); setQuery(''); setFilter('all'); setApplied({ filter: 'all', query: '' }); setQueryError(''); observed.current = ''; }, [history?.epoch]);
   useEffect(() => () => { sequence.current++; }, []);
   const load = async (nextFilter, nextQuery, before = 0, seed) => {
@@ -138,12 +161,12 @@ export function CommandHistory({ history, stale, disabled, run, busy }) {
       <div className="history-filters" role="group" aria-label="按请求类型筛选">{filters.map(item => <button key={item.id} disabled={disabled || loading} aria-pressed={applied.filter === item.id} onClick={() => applyFilter(item.id)}>{item.label}</button>)}</div>
     </div>
     <div className="history-view-status"><span className={stale || queryError ? 'is-stale' : ''}><i aria-hidden="true" />{loading ? '正在查询全部历史' : stale || queryError ? '上次记录 · 待同步' : older?.before > 0 ? '正在查看较早记录' : '最新记录 · 自动同步'}</span><span>{filtered ? '共匹配 ' + (data.matchedCount ?? entries.length) + ' 条 · 本页 ' + entries.length + ' 条' : '当前页 ' + entries.length + ' 条'}</span></div>
-    <p className="history-scope-note">仅保存在手机 · 请求和手机返回对应记录；没有退出码时不推断成功。{filtered && `当前筛选：${filters.find(item => item.id === applied.filter)?.label}${applied.query ? ' · ' + applied.query : ''}；范围为全部已保存记录。`}</p>
+    <p className="history-scope-note">只记录 ADB 命令 · 同一电脑连续发送相同命令只保留第一条及其返回；后台协议不记录，也不会打断去重。{filtered && `当前筛选：${filters.find(item => item.id === applied.filter)?.label}${applied.query ? ' · ' + applied.query : ''}；范围为全部已保存记录。`}</p>
     {queryError && <div className="message error" role="status"><Info20Regular /><p>{queryError}</p><button className="text-button" disabled={disabled || loading} onClick={() => load(filter, query.trim())}>重试</button></div>}
     {history.problem && <div className="message error" role="status"><Info20Regular /><p>{history.problem}</p></div>}
     {confirm && <div className="history-confirm" role="group" aria-labelledby="history-clear-title"><span className="history-confirm-icon"><Delete20Regular /></span><div><h3 id="history-clear-title">清空全部历史记录？</h3><p>将删除这台手机保存的 {history.count} 条记录，无法恢复。新请求仍会继续记录。</p></div><div className="button-row"><button className="secondary-button" disabled={!!busy} onClick={() => setConfirm(false)}>保留记录</button><button className="danger-button" disabled={disabled} onClick={async () => { if (await run('clear-history', {}, '历史记录已清空。')) { setOlder(null); setConfirm(false); resetFilters(); } }}>{busy === 'clear-history' ? '正在清空…' : '确认清空'}</button></div></div>}
-    {visible.length ? <div className="history-stream" tabIndex="0" role="region" aria-label="ADB 请求列表，可滚动" key={[history.epoch, applied.filter, applied.query, older?.before || 0].join('|')}><HistoryStream entries={entries} today={new Date().toDateString()} /></div> : <div className="group history-empty empty-state"><span className="history-empty-icon">{filtered ? <Search20Regular /> : <History24Regular />}</span><strong>{filtered ? '全部历史中没有匹配记录' : older ? '没有更早的记录' : '还没有远程请求'}</strong><p>{filtered ? '试试其他关键词或类型。' : '电脑通过本模块调试、安装应用或传输文件后，请求会显示在这里。'}</p>{filtered && <button className="text-button" onClick={resetFilters}>重置筛选</button>}</div>}
+    {visible.length ? <div className="history-stream" tabIndex="0" role="region" aria-label="ADB 请求列表，可滚动" key={[history.epoch, applied.filter, applied.query, older?.before || 0].join('|')}><HistoryStream entries={entries} today={new Date().toDateString()} epoch={history.epoch} loadDetail={loadDetail} /></div> : <div className="group history-empty empty-state"><span className="history-empty-icon">{filtered ? <Search20Regular /> : <History24Regular />}</span><strong>{filtered ? '全部历史中没有匹配记录' : older ? '没有更早的记录' : '还没有远程请求'}</strong><p>{filtered ? '试试其他关键词或类型。' : '电脑通过本模块调试、安装应用或传输文件后，请求会显示在这里。'}</p>{filtered && <button className="text-button" onClick={resetFilters}>重置筛选</button>}</div>}
     <div className="history-footer"><button className="secondary-button" disabled={!older?.before || !!busy || loading} onClick={() => filtered ? load(applied.filter, applied.query) : resetFilters()}>返回最新</button><button className="secondary-button" disabled={disabled || loading || !data.hasMore || !entries.length} onClick={loadOlder}>{loading ? '正在读取…' : '查看更早记录'}<ChevronRight20Regular aria-hidden="true" /></button></div>
-    <details className="history-explainer"><summary><Info20Regular aria-hidden="true" /><span>记录范围与隐私</span><ChevronRight20Regular aria-hidden="true" /></summary><p>最多保留最近 {history.limit} 条，每页默认显示 {HISTORY_PAGE_SIZE} 条；超出保存上限后才移除最旧记录。记录可观察的命令参数和手机返回文本；Shell v2／ABB 分开显示标准输出、错误输出及退出码，文件操作保存协议结果，不保存传输的文件内容。单条请求最多读取 4096 字节，结果合计最多 4 KiB，超长内容明确标记截断。安装的各阶段分别记录。设备端无法获得电脑原始命令行、APK 本地路径、-s 等客户端参数，不能保证等效表达可直接重放。交互式 Shell 不采集逐键输入与回显；二进制结果、RSA 认证和未经过模块的命令不采集。旧记录的返回内容无法补录。常见密码、令牌和配对码会脱敏，返回文本仍可能包含个人信息，可随时清空。</p></details>
+    <details className="history-explainer"><summary><Info20Regular aria-hidden="true" /><span>记录范围与隐私</span><ChevronRight20Regular aria-hidden="true" /></summary><p>使用 SQLite 数据库，最多保留最近 {history.limit} 条，每页默认显示 {HISTORY_PAGE_SIZE} 条；只记录实际 ADB 命令，过滤内部跟踪、文件通道和探测请求；忽略协议包装后，同一电脑的连续相同命令和参数只记录第一次，返回内容也保留第一次的结果。其他实际命令打断后可再次记录，后台协议不打断去重；超出保存上限后才移除最旧记录。记录可观察的命令参数和手机返回文本；Shell v2／ABB 分开显示标准输出、错误输出及退出码，文件操作保存协议结果，不保存传输的文件内容。单条请求最多读取 4096 字节，结果合计最多 4 KiB，超长内容明确标记截断。安装的各阶段分别记录。设备端无法获得电脑原始命令行、APK 本地路径、-s 等客户端参数，不能保证等效表达可直接重放。交互式 Shell 不采集逐键输入与回显；二进制结果、RSA 认证和未经过模块的命令不采集。旧记录的返回内容无法补录。常见密码、令牌和配对码会脱敏，返回文本仍可能包含个人信息，可随时清空。</p></details>
   </section>;
 }

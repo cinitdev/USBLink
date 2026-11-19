@@ -11,14 +11,17 @@ public final class Controller implements Closeable {
     private final SharingStore store;
     private final SharingTransport proxy;
     private final int listenPort;
+    private final String version;
     private final PresenceServer presence;
     private String presenceProblem;
     private boolean enabled,recovered,startAttempted,blocked,closed,offClean;
     private int connectPort;
     private String state="off",problem,storeProblem;
-    public Controller(Platform platform,MeshNetwork mesh,SharingStore store,SharingTransport proxy) {this(platform,mesh,store,proxy,proxy.usb()?3240:3242);}
-    Controller(Platform platform,MeshNetwork mesh,SharingStore store,SharingTransport proxy,int listenPort) {
-        this.platform=platform;this.mesh=mesh;this.store=store;this.proxy=proxy;this.listenPort=listenPort;
+    public Controller(Platform platform,MeshNetwork mesh,SharingStore store,SharingTransport proxy) {this(platform,mesh,store,proxy,proxy.usb()?3240:3242,"0.0.0");}
+    public Controller(Platform platform,MeshNetwork mesh,SharingStore store,SharingTransport proxy,String version) {this(platform,mesh,store,proxy,proxy.usb()?3240:3242,version);}
+    Controller(Platform platform,MeshNetwork mesh,SharingStore store,SharingTransport proxy,int listenPort) {this(platform,mesh,store,proxy,listenPort,"0.0.0");}
+    private Controller(Platform platform,MeshNetwork mesh,SharingStore store,SharingTransport proxy,int listenPort,String version) {
+        this.platform=platform;this.mesh=mesh;this.store=store;this.proxy=proxy;this.listenPort=listenPort;this.version=version;
         presence=new PresenceServer(listenPort==0?0:3241);
         try{enabled=store.load();}catch(IOException e){storeProblem=e.getMessage();}
     }
@@ -130,7 +133,7 @@ public final class Controller implements Closeable {
     }
     public synchronized Map<String,Object> status()throws IOException {
         boolean active=enabled && proxy.active("adb");
-        return Json.map("version",proxy.usb()?"0.3.25":"0.2.15","device",platform.device(),
+        return Json.map("version",version,"device",platform.device(),
             "sharing",Json.map("enabled",enabled,"active",active,"state",state,"problem",problem),
             "debug",Json.map("mode",proxy.usb()?"usb-adb-experimental":"system-tcp","enabled",connectPort>0,"connectAddress",active?mesh.localIp()+":"+proxy.boundPort("adb"):null),
             "appSession",Json.map("ready",presence.active(),"problem",presenceProblem),

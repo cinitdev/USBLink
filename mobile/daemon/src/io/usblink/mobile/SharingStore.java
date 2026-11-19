@@ -15,7 +15,7 @@ public final class SharingStore {
     private final Path file;
     private final int version;
     public SharingStore(Path directory) {this(directory,2);}
-    public SharingStore(Path directory,int version) { file=directory.resolve("sharing.json");this.version=version; }
+    public SharingStore(Path directory,int version) { file=StateLayout.file(directory,"sharing.json");this.version=version; }
     public boolean load() throws IOException {
         if (!Files.exists(file)) return false;
         if (Files.size(file)>1024) throw new IOException("共享设置损坏，请关闭共享以重置");

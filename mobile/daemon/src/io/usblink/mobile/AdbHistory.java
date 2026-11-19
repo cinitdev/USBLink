@@ -1,77 +1,101 @@
 package io.usblink.mobile;
 
-import java.io.IOException;
+import java.io.*;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.*;
-import java.nio.file.attribute.PosixFilePermissions;
+import java.security.MessageDigest;
 import java.util.*;
 import java.util.concurrent.*;
 import java.util.function.Consumer;
 
-/** Private rolling request history. Disk I/O is coalesced off the transport threads. */
+/** Bounded SQLite history. Transport callbacks never wait for database I/O. */
 public final class AdbHistory implements AutoCloseable {
-    private static final int LIMIT=1000,PAGE=100;
+    private static final int LIMIT=200;
     private static final Set<String> FILTERS=new HashSet<>(Arrays.asList("all","install","app","command","file","device","debug","network","other"));
-    private final Path file;
     private final List<Map<String,Object>> entries=new ArrayList<>();
+    private final Map<Long,Map<String,Object>> dirty=new LinkedHashMap<>();
     private final ScheduledExecutorService writer=Executors.newSingleThreadScheduledExecutor(r->{Thread t=new Thread(r,"usblink-history");t.setDaemon(true);return t;});
+    private HistorySqlStore store;
     private String epoch=UUID.randomUUID().toString(),problem="";
-    private long next=1,revision,savedRevision;
-    private boolean scheduled,closed;
-    public AdbHistory(Path state) {
-        file=state.resolve("adb-history.jsonl");
+    private long next=1,revision,savedRevision,clearRevision;
+    private String savedEpoch=epoch;
+    private boolean scheduled,closed,clearPending;
+    public AdbHistory(Path state,HistoryDatabase.Factory factory) {
         try {
-            if(Files.exists(file)) {
-                if(Files.size(file)>32*1024*1024)throw new IOException();
-                List<String> rows=Files.readAllLines(file,StandardCharsets.UTF_8);
-                if(rows.size()>LIMIT)throw new IOException();
-                long previous=0;
-                for(String row:rows) {
-                    Map<String,Object> item=Json.object(Json.parse(row));long id=number(item,"id"),at=number(item,"at");
-                    if(id<=previous || id>=Long.MAX_VALUE || at<0)throw new IOException();
-                    Map<String,Object> value=entry(id,at,Json.string(item,"peer"),Json.string(item,"kind"),Json.string(item,"command"));
-                    if(item.get("response") instanceof Map) {
-                        Map<String,Object> response=response(Json.object(item.get("response")));
-                        if("pending".equals(response.get("state")))response.put("state","interrupted");
-                        value.put("response",response);
+            Path database=StateLayout.file(state,"adb-history.db");
+            StateLayout.adoptCompanions(database);
+            Files.createDirectories(state);
+            store=new HistorySqlStore(factory.open(database));
+            store.db.begin();boolean committed=false;
+            try {
+                store.db.exec("UPDATE history SET responseState='interrupted',version=version+1 WHERE responseState='pending'");
+                store.prune();
+                // Apply the command-only policy to the existing SQLite rows too.
+                // JSON history is never opened. Preserve the earliest row and its result.
+                String previous=null;
+                for(Map<String,Object> item:store.load()) {
+                    long id=number(item,"id");next=Math.max(next,id+1);
+                    String command=AdbRequestType.recordedCommand((String)item.get("kind"),(String)item.get("command"));
+                    if(command==null){store.db.exec("DELETE FROM history WHERE id=?",id);continue;}
+                    String key=(String)item.get("signature");
+                    if(!key.startsWith("command:")) {
+                        // Old sanitized/truncated arguments cannot prove identical originals.
+                        if(!command.contains("[已隐藏]") && !command.contains("[配对码已隐藏]") && !command.contains("…"))
+                            key=signature((String)item.get("peer"),command);
+                        if(!key.equals(item.get("signature"))){item.put("signature",key);store.put(item);}
                     }
-                    entries.add(Collections.unmodifiableMap(value));
-                    previous=id;next=id+1;
+                    if(key.equals(previous)){store.db.exec("DELETE FROM history WHERE id=?",id);continue;}
+                    previous=key;
                 }
-            }
-        } catch(Exception e){entries.clear();next=1;problem="历史记录无法读取；旧文件将在收到新请求或清空时重建";}
+                committed=true;
+            }finally{store.db.end(committed);}
+            entries.addAll(store.load());
+            for(Map<String,Object> item:entries)next=Math.max(next,number(item,"id")+1);
+        } catch(Exception e) {
+            if(store!=null)try{store.close();}catch(IOException ignored){}
+            store=null;entries.clear();problem="历史数据库无法打开；请检查模块数据目录，已有数据未被覆盖";
+        }
     }
-    public Consumer<byte[]> observe(String peer) {
-        AdbCommandObserver parser=parser(peer);
-        return bytes->parser.accept(bytes,0,bytes.length);
-    }
+    public Consumer<byte[]> observe(String peer){AdbCommandObserver parser=parser(peer);return bytes->parser.accept(bytes,0,bytes.length);}
     public AdbCommandObserver parser(String peer){return new AdbCommandObserver(new AdbCommandObserver.Recorder() {
         public long request(String kind,String command){return record(peer,kind,command);}
         public void response(long id,Map<String,Object> value){update(id,value);}
     });}
     private static long number(Map<String,Object> data,String key){Object value=data.get(key);if(!(value instanceof Long) && !(value instanceof Integer))throw new IllegalArgumentException("历史记录参数无效");return ((Number)value).longValue();}
     private synchronized long record(String peer,String kind,String command) {
-        if(closed)return -1;
-        long id=next++;
-        entries.add(Collections.unmodifiableMap(entry(id,System.currentTimeMillis(),peer,kind,command)));
-        if(entries.size()>LIMIT)entries.remove(0);revision++;
-        schedule();return id;
+        if(closed || store==null)return -1;
+        String normalized=AdbRequestType.recordedCommand(kind,command);
+        if(normalized==null)return -1;
+        Map<String,Object> item=entry(next,System.currentTimeMillis(),peer,kind,command,normalized);
+        if(!entries.isEmpty() && item.get("signature").equals(entries.get(entries.size()-1).get("signature")))return -1;
+        long id=next++;entries.add(item);
+        if(entries.size()>LIMIT)dirty.remove(number(entries.remove(0),"id"));
+        revision++;dirty.put(id,item);schedule();return id;
     }
     private synchronized void update(long id,Map<String,Object> response) {
-        if(closed)return;
-        for(int i=entries.size()-1;i>=0;i--)if((Long)entries.get(i).get("id")==id) {
+        if(closed || id<0)return; // Suppressed repeats must never overwrite the first request's response.
+        for(int i=entries.size()-1;i>=0;i--)if(number(entries.get(i),"id")==id) {
             Map<String,Object> item=new LinkedHashMap<>(entries.get(i));item.put("response",response(response));
-            entries.set(i,Collections.unmodifiableMap(item));revision++;schedule();return;
+            item.put("version",number(item,"version")+1);entries.set(i,item);dirty.put(id,item);revision++;schedule();return;
         }
-        // Evicted/cleared requests cannot be recreated by a delayed device response.
     }
-    private void schedule() {
-        if(!scheduled){scheduled=true;writer.schedule(this::persist,1,TimeUnit.SECONDS);}
+    private void schedule(){if(!scheduled){scheduled=true;writer.schedule(this::persist,300,TimeUnit.MILLISECONDS);}}
+    private static String signature(String peer,String command) {
+        try {
+            MessageDigest digest=MessageDigest.getInstance("SHA-256");
+            for(String value:new String[]{peer,command}) {
+                byte[] bytes=value.getBytes(StandardCharsets.UTF_8);
+                digest.update(java.nio.ByteBuffer.allocate(4).putInt(bytes.length).array());digest.update(bytes);
+            }
+            return "command:"+Base64.getEncoder().encodeToString(digest.digest());
+        }catch(java.security.NoSuchAlgorithmException e){throw new IllegalStateException(e);}
     }
-    private static Map<String,Object> entry(long id,long at,String peer,String kind,String command) {
+    private static Map<String,Object> entry(long id,long at,String peer,String kind,String command,String normalized) {
         AdbRequestType type=AdbRequestType.of(kind,command);
-        return Json.map("id",id,"at",at,"peer",clean(peer,64),"kind",clean(kind,24),"command",clean(AdbRequestType.printable(command),4096),"category",type.category,"action",type.action);
+        return Json.map("id",id,"at",at,"peer",clean(peer,64),"kind",clean(kind,24),"command",clean(AdbRequestType.printable(command),4096),
+            "category",type.category,"action",type.action,"signature",signature(peer,normalized),"version",1L);
     }
+    static String preview(String text){return text.getBytes(StandardCharsets.UTF_8).length<=120?text:utf8Limit(text,117)+"…";}
     private static Map<String,Object> response(Map<String,Object> data) {
         String state=String.valueOf(data.getOrDefault("state","unavailable"));
         if(!Arrays.asList("pending","completed","closed","interrupted","unavailable","unparsed").contains(state))state="unavailable";
@@ -99,7 +123,10 @@ public final class AdbHistory implements AutoCloseable {
         return value;
     }
     private static String redact(String value) {
-        return value.replaceAll("(?i)USBLINK(?:1)?-[A-Za-z0-9_+/=.-]+","[配对码已隐藏]")
+        // Pairing uses USBLINK1- plus URL-safe Base64. Plain usblink-* filenames,
+        // module names and network names are not pairing codes. Redact incomplete
+        // versioned codes too, because a truncated result can still contain secrets.
+        return value.replaceAll("(?i)USBLINK1-[A-Za-z0-9_-]+={0,2}","[配对码已隐藏]")
             .replaceAll("(?i)((?:password|passwd|token|secret|api[_-]?key|authorization)[\"']?\\s*[=:]\\s*|--(?:password|token|secret|api-key)\\s+)(?:\"[^\"]*\"|'[^']*'|[^\\s]+)","$1[已隐藏]");
     }
     private static String cleanOutput(String value) {
@@ -109,61 +136,62 @@ public final class AdbHistory implements AutoCloseable {
             .replaceAll("[\\p{Cc}\\p{Cf}&&[^\\r\\n\\t]]","");
         return value.length()>4096?value.substring(0,4095)+"…":value;
     }
-    public synchronized Map<String,Object> page(long before) {
-        return page(before,"all","");
-    }
-    private Map<String,Object> page(long before,String filter,String query) {
-        List<Map<String,Object>> result=new ArrayList<>();
-        int matched=0,bytes=0;boolean more=false;String needle=query.toLowerCase(Locale.ROOT);
-        for(int i=entries.size()-1;i>=0;i--) {
-            Map<String,Object> item=entries.get(i);
-            boolean category=filter.equals("all") || filter.equals(item.get("category")) || filter.equals("install") && ((String)item.get("action")).startsWith("install");
-            if(!category)continue;
-            String display=needle.isEmpty()?"":AdbRequestType.adbCommand((String)item.get("kind"),(String)item.get("command"));
-            String alias=((String)item.get("action")).startsWith("install")?"adb install":item.get("action").equals("uninstall")?"adb uninstall":"";
-            Map<String,Object> response=item.get("response") instanceof Map?Json.object(item.get("response")):Collections.emptyMap();
-            if(!needle.isEmpty() && !(item.get("command")+" "+display+" "+alias+" "+item.get("peer")+" "+response.getOrDefault("stdout","")+" "+response.getOrDefault("stderr","")).toLowerCase(Locale.ROOT).contains(needle))continue;
-            matched++;
-            if(before==0 || (Long)item.get("id")<before) {
-                if(more || result.size()>=PAGE){more=true;continue;}
-                if(display.isEmpty())display=AdbRequestType.adbCommand((String)item.get("kind"),(String)item.get("command"));
-                Map<String,Object> view=new LinkedHashMap<>(item);view.put("adbCommand",display);
-                int size=Json.stringify(view).getBytes(StandardCharsets.UTF_8).length+1;
-                // Stop at the first full page: never skip a long row and break the cursor.
-                if(bytes+size<=40000){result.add(view);bytes+=size;}else more=true;
-            }
-        }
-        return Json.map("entries",result,"count",entries.size(),"epoch",epoch,"revision",revision,"hasMore",more,"problem",problem,"limit",LIMIT,"matchedCount",matched,"filter",filter,"query",query);
+    public Map<String,Object> page(long before) {
+        try{return query(before,"all","",null,0);}
+        catch(IOException e){synchronized(this){return Json.map("entries",new ArrayList<>(),"count",entries.size(),"epoch",epoch,"revision",revision,"hasMore",false,"problem",problem.isEmpty()?e.getMessage():problem,"limit",LIMIT);}}
     }
     public Map<String,Object> page(Map<String,Object> input)throws IOException {
-        long before=number(input,"before");
+        long before=input.containsKey("before")?number(input,"before"):0,detail=input.containsKey("id")?number(input,"id"):0;
         String filter=input.containsKey("filter")?Json.string(input,"filter"):"all",query=input.containsKey("query")?Json.string(input,"query").trim():"";
-        if(!FILTERS.contains(filter) || query.length()>128)throw new IOException("历史筛选条件无效");
-        synchronized(this){if(before<0 || !epoch.equals(Json.string(input,"epoch")))throw new IOException("历史记录已更新，请返回最新记录");return page(before,filter,query);}
+        if(before<0 || detail<0 || !FILTERS.contains(filter) || query.length()>128)throw new IOException("历史筛选条件无效");
+        return query(before,filter,query,Json.string(input,"epoch"),detail);
+    }
+    private Map<String,Object> query(long before,String filter,String query,String expected,long detail)throws IOException {
+        return await(()->{
+            persist();String stamp;long version;
+            synchronized(this){
+                if(store==null || !problem.isEmpty())throw new IOException(problem);
+                if(expected!=null && !epoch.equals(expected))throw new IOException("历史记录已更新，请返回最新记录");
+                if(!epoch.equals(savedEpoch))throw new IOException("历史记录已更新，请返回最新记录");
+                stamp=savedEpoch;version=savedRevision;
+            }
+            Map<String,Object> page;
+            if(detail>0) {
+                Map<String,Object> item=store.detail(detail);item.remove("signature");
+                page=Json.map("entries",Collections.singletonList(item),"hasMore",false,"detail",true);
+            } else page=store.page(before,filter,query);
+            synchronized(this){if(!stamp.equals(epoch))throw new IOException("历史记录已更新，请返回最新记录");}
+            page.put("epoch",stamp);page.put("revision",version);page.put("problem","");page.put("limit",LIMIT);page.put("storage","sqlite");return page;
+        });
     }
     public void clear()throws IOException {
-        synchronized(this){entries.clear();epoch=UUID.randomUUID().toString();revision++;}
-        flush();
+        synchronized(this){if(store==null)throw new IOException(problem);entries.clear();dirty.clear();clearPending=true;epoch=UUID.randomUUID().toString();clearRevision=++revision;}
+        await(()->{persist();synchronized(this){if(!problem.isEmpty())throw new IOException(problem);}return null;});
     }
     private void persist() {
-        List<Map<String,Object>> copy;long stamp;
-        synchronized(this){scheduled=false;stamp=revision;if(stamp==savedRevision)return;copy=new ArrayList<>(entries);}
+        Map<Long,Map<String,Object>> copy;long stamp,clearStamp;boolean clear;String snapshotEpoch;
+        synchronized(this){scheduled=false;if(store==null || revision==savedRevision)return;stamp=revision;copy=new LinkedHashMap<>(dirty);clear=clearPending;clearStamp=clearRevision;snapshotEpoch=epoch;}
         try {
-            Files.createDirectories(file.getParent());Path temp=file.resolveSibling("adb-history.json.new");
-            StringBuilder lines=new StringBuilder();for(Map<String,Object> item:copy)lines.append(Json.stringify(item)).append('\n');
-            byte[] bytes=lines.toString().getBytes(StandardCharsets.UTF_8);
-            Files.write(temp,bytes);
-            try{Files.setPosixFilePermissions(temp,PosixFilePermissions.fromString("rw-------"));}catch(UnsupportedOperationException ignored){}
-            try{Files.move(temp,file,StandardCopyOption.REPLACE_EXISTING,StandardCopyOption.ATOMIC_MOVE);}
-            catch(AtomicMoveNotSupportedException e){Files.move(temp,file,StandardCopyOption.REPLACE_EXISTING);}
-            synchronized(this){savedRevision=stamp;problem="";}
-        }catch(IOException|RuntimeException e){synchronized(this){problem="历史记录保存失败，重启后可能丢失；请检查模块数据目录";}}
+            store.db.begin();boolean commit=false;
+            try {if(clear)store.db.exec("DELETE FROM history");for(Map<String,Object> item:copy.values())store.put(item);store.prune();commit=true;}
+            finally{store.db.end(commit);}
+            synchronized(this){
+                savedRevision=stamp;savedEpoch=snapshotEpoch;problem="";
+                // A clear arriving during I/O must remain pending for the next transaction.
+                if(clear && clearRevision==clearStamp)clearPending=false;
+                for(Map.Entry<Long,Map<String,Object>> item:copy.entrySet())if(dirty.get(item.getKey())==item.getValue())dirty.remove(item.getKey());
+            }
+        }catch(IOException|RuntimeException e){synchronized(this){problem="历史数据库保存失败，请检查模块数据目录；USB 转发不受影响";}}
     }
-    private void flush()throws IOException {
-        try{writer.submit(this::persist).get(5,TimeUnit.SECONDS);}
-        catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException("历史记录保存被中断");}
-        catch(ExecutionException|TimeoutException e){throw new IOException("历史记录保存尚未确认，请稍后检查");}
-        synchronized(this){if(!problem.isEmpty())throw new IOException(problem);}
+    private <T> T await(Callable<T> action)throws IOException {
+        try{return writer.submit(action).get(5,TimeUnit.SECONDS);}
+        catch(InterruptedException e){Thread.currentThread().interrupt();throw new IOException("历史记录读取被中断");}
+        catch(ExecutionException e){if(e.getCause() instanceof IOException)throw (IOException)e.getCause();throw new IOException("历史数据库查询失败，请稍后重试");}
+        catch(TimeoutException|RejectedExecutionException e){throw new IOException("历史记录处理尚未完成，请稍后检查");}
     }
-    @Override public void close(){synchronized(this){if(closed)return;closed=true;}try{flush();}catch(IOException ignored){}writer.shutdown();}
+    @Override public void close() {
+        synchronized(this){if(closed)return;closed=true;}
+        try{await(()->{persist();if(store!=null)store.close();return null;});}catch(IOException ignored){}
+        writer.shutdown();
+    }
 }

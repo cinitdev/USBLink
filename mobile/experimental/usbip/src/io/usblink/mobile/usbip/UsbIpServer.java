@@ -16,6 +16,7 @@ import java.util.concurrent.atomic.AtomicReference;
 /** Bounded userspace USB/IP v1.1.1 experiment: one ADB device, one manual import. */
 public final class UsbIpServer implements Closeable {
     public interface Backend { Socket connect() throws IOException; }
+    public interface OwnerObserver { Owner query(InetAddress peer,InetAddress local,int clientPort,int serverPort); }
     public interface TrafficObserver extends Consumer<byte[]> {
         void returned(byte[] bytes);
         void close();
@@ -24,9 +25,13 @@ public final class UsbIpServer implements Closeable {
     public static final class Owner {
         private final byte[] instance;
         private final int phase;
+        private final int transport;
         public Owner(byte[] instance,int phase) {
-            if(instance.length!=16 || phase<0 || phase>3)throw new IllegalArgumentException("invalid owner");
-            this.instance=instance.clone();this.phase=phase;
+            this(instance,phase,0);
+        }
+        public Owner(byte[] instance,int phase,int transport) {
+            if(instance.length!=16 || phase<0 || phase>3 || transport<0 || transport>2)throw new IllegalArgumentException("invalid owner");
+            this.instance=instance.clone();this.phase=phase;this.transport=transport;
         }
         boolean supersedes(Owner old) {
             boolean same=Arrays.equals(instance,old.instance);
@@ -36,6 +41,7 @@ public final class UsbIpServer implements Closeable {
         }
     }
     public enum EndReason {
+        CLIENT_TRANSPORT_GONE("电脑已确认旧 USB 连接结束，残留会话已释放，可在电脑手动连接",false),
         DESKTOP_REPLACED("电脑程序已退出或更新，旧 USB 会话已释放，请在电脑手动连接",true),
         CLIENT_CLOSED("电脑侧 USB/IP 连接已结束，可能是断开操作或网络中断",false),
         CLIENT_IO("电脑侧 USB/IP 读写中断，请检查电脑与网络",false),
@@ -67,7 +73,7 @@ public final class UsbIpServer implements Closeable {
     private final Consumer<String> log;
     private final Consumer<Map<String,Object>> onDisconnect;
     private final Function<String,Consumer<byte[]>> observeUpload;
-    private final Function<InetAddress,Owner> observeOwner;
+    private final OwnerObserver observeOwner;
     private final ScheduledExecutorService ownerChecks=Executors.newSingleThreadScheduledExecutor(r->{
         Thread t=new Thread(r,"usblink-usb-owner");t.setDaemon(true);return t;
     });
@@ -104,6 +110,11 @@ public final class UsbIpServer implements Closeable {
                        Backend backend, Consumer<String> log, Consumer<Map<String,Object>> onDisconnect,
                        Function<String,Consumer<byte[]>> observeUpload,
                        Function<InetAddress,Owner> observeOwner) throws IOException {
+        this(bind,port,peer,device,backend,log,onDisconnect,observeUpload,(address,local,clientPort,serverPort)->observeOwner.apply(address));
+    }
+    public UsbIpServer(InetAddress bind, int port, Predicate<InetAddress> peer, AdbUsbDevice device,
+                       Backend backend, Consumer<String> log, Consumer<Map<String,Object>> onDisconnect,
+                       Function<String,Consumer<byte[]>> observeUpload, OwnerObserver observeOwner) throws IOException {
         this.device=device; this.backend=backend; this.allowedPeer=peer; this.log=log;this.onDisconnect=onDisconnect;this.observeUpload=observeUpload;
         this.observeOwner=observeOwner;
         try {
@@ -132,13 +143,15 @@ public final class UsbIpServer implements Closeable {
         s.end(EndReason.USER_DISCONNECT);
     }
     public long firstImportNanos() { return firstImportNanos; }
-    private Owner owner(InetAddress peer) {
-        try{return observeOwner.apply(peer);}catch(RuntimeException ignored){return null;}
+    private Owner owner(Socket client) {
+        try{return observeOwner.query(client.getInetAddress(),client.getLocalAddress(),client.getPort(),client.getLocalPort());}catch(RuntimeException ignored){return null;}
     }
     private void releaseReplaced(Session old) {
-        if(old==null || old.owner==null || old.stopped || closed)return;
-        Owner current=owner(old.client.getInetAddress());
-        if(current!=null && session==old && current.supersedes(old.owner))old.end(EndReason.DESKTOP_REPLACED);
+        if(old==null || old.stopped || closed)return;
+        Owner current=owner(old.client);
+        if(current==null || session!=old || old.stopped || closed)return;
+        if(old.owner!=null && current.supersedes(old.owner))old.end(EndReason.DESKTOP_REPLACED);
+        else if(current.phase==1 && current.transport==2)old.end(EndReason.CLIENT_TRANSPORT_GONE);
     }
     private void awaitOldSession()throws IOException {
         Session old=session;
@@ -185,7 +198,7 @@ public final class UsbIpServer implements Closeable {
             if(!Arrays.equals(bus,expected)){reply(out,3,1);return;}
             if(imported.get())awaitOldSession();
             if(!(owns=acquireImport())){reply(out,3,1);return;}
-            Owner desktop=owner(socket.getInetAddress());
+            Owner desktop=owner(socket);
             if(desktop!=null && desktop.phase!=1)throw new IOException("desktop cleanup pending");
             device.reset();
             try(Socket target=backend.connect()) {
@@ -196,7 +209,9 @@ public final class UsbIpServer implements Closeable {
                 reply(out,3,0);out.write(device.record());socket.setSoTimeout(0);
                 log.accept("import accepted");
                 Session s=new Session(socket,target,in,out,desktop);owned=s;session=s;if(closed)s.end(closeReason);
-                ScheduledFuture<?> watch=desktop==null || closed?null:
+                // Even if the first observation failed, a later authenticated
+                // observation can prove this exact old connection is gone.
+                ScheduledFuture<?> watch=closed?null:
                     ownerChecks.scheduleWithFixedDelay(()->releaseReplaced(s),5,5,TimeUnit.SECONDS);
                 try{s.run();}finally{if(watch!=null)watch.cancel(false);}
                 }finally{synchronized(clients){targets.remove(target);}}

@@ -26,11 +26,11 @@ test('history displays observed arguments as adb equivalents without inventing h
 test('full history search finds older installs and preserves the chosen filter in responses', async () => {
   const client = createClient({ preview: true, usbPreview: true, historyPreview: true });
   const status = await client.request('status');
-  assert.equal(status.history.limit, 1000);
-  assert.ok(status.history.entries.length > 0 && status.history.entries.length <= 100);
+  assert.equal(status.history.limit, 200);
+  assert.ok(status.history.entries.length > 0 && status.history.entries.length <= 50);
   assert.equal(status.history.hasMore, true);
   const display = await readHistoryPage(payload => client.request('history', payload), { before: 0, epoch: status.history.epoch, filter: 'all', query: '' }, status.history);
-  assert.equal(display.entries.length, 100);
+  assert.equal(display.entries.length, 50);
   const payload = { before: 0, epoch: status.history.epoch, filter: 'install', query: 'older-release.apk' };
   const result = await client.request('history', payload);
   assert.equal(result.matchedCount, 10);
@@ -43,25 +43,26 @@ test('full history search finds older installs and preserves the chosen filter i
   await assert.rejects(client.request('history', payload), /历史记录已更新/);
 });
 
-test('byte-bounded reads fill 100 visible rows without losing the next page', async () => {
+test('byte-bounded reads fill 50 visible rows without losing the next page', async () => {
   const records = Array.from({ length: 125 }, (_, i) => ({ id: 125 - i, response: { stdout: 'x'.repeat(4096) } }));
   const payload = { epoch: 'one', before: 0, filter: 'all', query: '' };
   let reads = 0;
   const read = async args => {
     reads++;
     const rows = records.filter(item => !args.before || item.id < args.before);
-    return { ...payload, entries: rows.slice(0, 7), hasMore: rows.length > 7, count: 125, limit: 1000 };
+    return { ...payload, entries: rows.slice(0, 7), hasMore: rows.length > 7, count: 125, limit: 200 };
   };
   const seed = await read(payload);
   const first = await readHistoryPage(read, payload, seed);
   assert.equal(first.entries.length, HISTORY_PAGE_SIZE);
   assert.equal(first.entries[0].id, 125);
-  assert.equal(first.entries.at(-1).id, 26);
+  assert.equal(first.entries.at(-1).id, 76);
   assert.equal(first.hasMore, true);
-  assert.equal(reads, 15);
-  const second = await readHistoryPage(read, { ...payload, before: 26 });
-  assert.deepEqual([...first.entries, ...second.entries].map(item => item.id), records.map(item => item.id));
-  assert.equal(second.hasMore, false);
+  assert.equal(reads, 8);
+  const second = await readHistoryPage(read, { ...payload, before: 76 });
+  const third = await readHistoryPage(read, { ...payload, before: 26 });
+  assert.deepEqual([...first.entries, ...second.entries, ...third.entries].map(item => item.id), records.map(item => item.id));
+  assert.equal(third.hasMore, false);
 });
 
 test('page assembly rejects cleared history and stops when navigation cancels it', async () => {

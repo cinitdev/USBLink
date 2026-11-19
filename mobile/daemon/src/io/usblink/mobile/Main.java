@@ -41,6 +41,7 @@ public final class Main {
     }
     private static void serve(Path module,Path state) throws Exception {
         module=module.toRealPath();
+        String version=moduleVersion(module);
         Files.createDirectories(state);state=state.toRealPath();Os.chmod(state.toString(),0700);
         try(FileChannel lockFile=FileChannel.open(state.resolve("daemon.lock"),StandardOpenOption.CREATE,StandardOpenOption.WRITE)) {
             FileLock lock=lockFile.tryLock();if(lock==null)throw new IOException("控制服务已经运行");
@@ -49,8 +50,8 @@ public final class Main {
                 StatusSnapshot snapshot=new StatusSnapshot(state,Process.myPid(),selfStartTicks(),
                     new String(Files.readAllBytes(Paths.get("/proc/sys/kernel/random/boot_id")),StandardCharsets.US_ASCII).trim(),
                     ()->android.os.SystemClock.elapsedRealtime()/1000);
-                AdbHistory history=new AdbHistory(state);
-                Controller controller=new Controller(platform,new MeshManager(state,module,Json.string(platform.device(),"name")),new SharingStore(state,TransportFactory.USB?3:2),TransportFactory.create(platform,history))) {
+                AdbHistory history=new AdbHistory(state,AndroidHistoryDatabase::new);
+                Controller controller=new Controller(platform,new MeshManager(state,module,Json.string(platform.device(),"name")),new SharingStore(state,TransportFactory.USB?3:2),TransportFactory.create(platform,history),version)) {
                 ScheduledExecutorService scheduler=Executors.newSingleThreadScheduledExecutor(r->{Thread t=new Thread(r,"usblink-state");t.setDaemon(true);return t;});
                 Runtime.getRuntime().addShutdownHook(new Thread(()->{try{snapshot.close();}catch(IOException ignored){}controller.close();history.close();scheduler.shutdownNow();},"usblink-shutdown"));
                 // All scheduling and generation changes hold the controller lock. A mutation
@@ -82,7 +83,10 @@ public final class Main {
                                 Map<String,Object> request=Json.object(Json.parse(readLine(socket.getInputStream(),MAX_REQUEST)));
                                 String action=Json.string(request,"action");
                                 Map<String,Object> input=Json.object(request.get("input"));
-                                synchronized(controller) {
+                                if(action.equals("history")) {
+                                    // Indexed local reads do not need the network/controller lock or a full status refresh.
+                                    response=Json.map("ok",true,"data",history.page(input));
+                                } else synchronized(controller) {
                                     // A second WebUI must not see the pre-operation state as confirmed.
                                     if(!Controller.readOnly(action))snapshot.invalidate();
                                     try{response=Json.map("ok",true,"data",controller.handle(action,input));}
@@ -99,6 +103,17 @@ public final class Main {
             }finally {lock.release();}
         }
     }
+    private static String moduleVersion(Path module) {
+        // Report the installed module.prop instead of a source constant that goes stale.
+        try {
+            for(String line:Files.readAllLines(module.resolve("module.prop"),StandardCharsets.UTF_8))
+                if(line.startsWith("version=")) {
+                    String value=line.substring("version=".length()).trim();
+                    if(value.matches("[0-9]+\\.[0-9]+\\.[0-9]+"))return value;
+                }
+        }catch(Exception ignored) { /* Only the displayed version is affected. */ }
+        return "0.0.0";
+    }
     private static String selfStartTicks()throws IOException {
         String stat=new String(Files.readAllBytes(Paths.get("/proc/self/stat")),StandardCharsets.US_ASCII);
         int end=stat.lastIndexOf(") ");
@@ -113,7 +128,7 @@ public final class Main {
     }
     private static void restoreAdb(Path state)throws Exception {
         if(!state.toAbsolutePath().normalize().equals(Paths.get("/data/adb/usblink")))throw new IOException("恢复目录无效");
-        if(!Files.exists(state.resolve("adbd-tcp.json")))return;
+        if(!Files.exists(StateLayout.file(state,"adbd-tcp.json")))return;
         try(FileChannel file=FileChannel.open(state.resolve("daemon.lock"),StandardOpenOption.CREATE,StandardOpenOption.WRITE)) {
             FileLock lock=file.tryLock();if(lock==null)throw new IOException("控制服务尚未退出，暂不恢复调试配置");
             try{

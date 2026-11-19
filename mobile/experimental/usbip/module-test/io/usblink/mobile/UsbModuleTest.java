@@ -46,7 +46,7 @@ public final class UsbModuleTest {
     }
     private static void history()throws Exception {
         Path dir=Files.createTempDirectory("usblink-usb-history-");Phone phone=new Phone();
-        try(AdbHistory history=new AdbHistory(dir);ServerSocket backend=new ServerSocket(0);UsbTransport usb=new UsbTransport(phone,history)) {
+        try(AdbHistory history=new AdbHistory(dir,JdbcHistoryDatabase::new);ServerSocket backend=new ServerSocket(0);UsbTransport usb=new UsbTransport(phone,history)) {
             usb.configure("adb","127.0.0.1",0,backend.getLocalPort());
             try(Socket client=mount(usb.boundPort("adb"));Socket target=backend.accept()) {
                 target.setSoTimeout(3000);waitSession(usb);
@@ -59,7 +59,7 @@ public final class UsbModuleTest {
                 out.write(usbOut(3,2,command.length-9,new byte[8]));out.write(command,9,command.length-9);in.readFully(reply);
                 byte[] received=new byte[command.length];new DataInputStream(target.getInputStream()).readFully(received);
                 check(Arrays.equals(command,received),"History observes USB upload without altering bytes");
-                List<?> entries=(List<?>)history.page(0).get("entries");
+                List<?> entries=(List<?>)JdbcHistoryDatabase.fullPage(history,0).get("entries");
                 check(entries.size()==1 && Json.string(Json.object(entries.get(0)),"command").equals("shell,v2,raw:echo history"),"Module records one request across USB fragments");
                 byte[] ready=AdbHistoryTestMain.packet("OKAY",101,new byte[0]);
                 byte[] shell=ByteBuffer.allocate(5+8+5+1).order(java.nio.ByteOrder.LITTLE_ENDIAN)
@@ -74,7 +74,7 @@ public final class UsbModuleTest {
                     in.readFully(reply);int length=ByteBuffer.wrap(reply).getInt(24);byte[] body=new byte[length];in.readFully(body);returned.write(body);
                 }
                 check(Arrays.equals(result,returned.toByteArray()),"USB IN remains byte-for-byte unchanged while observing results");
-                Map<String,Object> recorded=Json.object(Json.object(((List<?>)history.page(0).get("entries")).get(0)).get("response"));
+                Map<String,Object> recorded=Json.object(Json.object(((List<?>)JdbcHistoryDatabase.fullPage(history,0).get("entries")).get(0)).get("response"));
                 check(recorded.get("stdout").equals("history\n") && ((Number)recorded.get("exitCode")).intValue()==0,"USB replies are correlated with the original command");
                 try(Controller controller=new Controller(phone,new TestMain.FakeMesh(),new SharingStore(dir,3),usb,0)) {
                     Map<String,Object> state=controller.handle("clear-history",Collections.emptyMap());

@@ -21,12 +21,39 @@ public final class AdbResponseTestMain {
         upload(parser,packet("OPEN",id,0,utf(command)));receive(parser,packet("OKAY",id+100,id,new byte[0]));
     }
     private static void reply(AdbCommandObserver parser,int id,byte[] data){receive(parser,packet("WRTE",id+100,id,data));}
-    private static Map<String,Object> entry(AdbHistory history,int index){return Json.object(((List<?>)history.page(0).get("entries")).get(index));}
+    private static Map<String,Object> entry(AdbHistory history,int index){return Json.object(((List<?>)JdbcHistoryDatabase.fullPage(history,0).get("entries")).get(index));}
     private static Map<String,Object> result(AdbHistory history,int index){return Json.object(entry(history,index).get("response"));}
-    public static void main(String[] args)throws Exception {shells();files();retention();System.out.println("PASS: "+checks+" correlated command/result checks");}
+    public static void main(String[] args)throws Exception {shells();files();retention();redaction();System.out.println("PASS: "+checks+" correlated command/result checks");}
+    private static void redaction()throws Exception {
+        Path dir=Files.createTempDirectory("usblink-history-redaction-");
+        String[] ordinary={
+            "su -c 'sh /data/local/tmp/usblink-organize-0.3.28.sh'",
+            "rm -f /data/local/tmp/usblink-layout-0.3.28.sh /data/local/tmp/USBLink-Mobile-0.3.28-usb-adb-arm64.zip",
+            "ls /data/adb/modules/usblink-mobile /data/adb/usblink-usb-probe",
+            "echo usblink-0123456789ab"
+        };
+        try(AdbHistory history=new AdbHistory(dir,JdbcHistoryDatabase::new)) {
+            AdbCommandObserver parser=history.parser("peer");int id=0;
+            for(String command:ordinary) {
+                open(parser,++id,"shell,v2,raw:"+command);reply(parser,id,shell(1,utf(command+"\n")));
+                check(("adb shell "+command).equals(entry(history,0).get("adbCommand")),"Ordinary paths and names remain intact in commands");
+                check((command+"\n").equals(result(history,0).get("stdout")),"Ordinary paths and names remain intact in output");
+            }
+            String code=new MeshProfile("usblink-0123456789ab","0123456789abcdef".repeat(4),MeshProfile.DEFAULT_RELAY).encode();
+            open(parser,++id,"shell,v2,raw:echo '"+code+"' --token private-value");
+            reply(parser,id,shell(1,utf(code+"\npassword=private-password\n")));
+            String recorded=Json.stringify(entry(history,0));
+            check(!recorded.contains(code) && !recorded.contains(code.substring(9)) && recorded.contains("[配对码已隐藏]"),"Real pairing code hidden in request and reply");
+            check(!recorded.contains("private-value") && !recorded.contains("private-password"),"Explicit credentials remain hidden");
+        }
+        try(AdbHistory history=new AdbHistory(dir,JdbcHistoryDatabase::new)) {
+            String recorded=Json.stringify(JdbcHistoryDatabase.fullPage(history,0));
+            check(recorded.contains("usblink-organize-0.3.28.sh") && recorded.contains("USBLink-Mobile-0.3.28-usb-adb-arm64.zip"),"Correct paths persist across database reload");
+        }
+    }
     private static void shells()throws Exception {
         Path dir=Files.createTempDirectory("usblink-results-");
-        try(AdbHistory history=new AdbHistory(dir)) {
+        try(AdbHistory history=new AdbHistory(dir,JdbcHistoryDatabase::new)) {
             AdbCommandObserver first=history.parser("peer-a"),second=history.parser("peer-b");
             open(first,1,"shell,v2,raw:echo 手机");open(second,1,"shell,v2,raw:pm uninstall app.test");
             byte[] chinese=shell(1,utf("手机\n第二行\n"));
@@ -45,59 +72,66 @@ public final class AdbResponseTestMain {
             check(result(history,0).get("stdout").toString().contains("INSTALL_FAILED"),"Actual installation failure text retained");
             open(first,4,"shell,v2,raw:echo secrets");
             reply(first,4,shell(1,utf("\u001b[31mred\u001b[0m\n{\"token\":\"TOP_SECRET\"}\nUSBLINK1-hidden-code\n")));
-            String text=Json.stringify(history.page(0));
+            String text=Json.stringify(JdbcHistoryDatabase.fullPage(history,0));
             check(!text.contains("TOP_SECRET") && !text.contains("hidden-code") && !text.contains("\\u001b") && text.contains("red\\n"),"Output redacted and ANSI stripped while lines remain");
             open(first,5,"shell,v2,raw:logcat");reply(first,5,shell(1,utf("x".repeat(5000))));reply(first,5,shell(3,new byte[]{7}));
             check(Boolean.TRUE.equals(result(history,0).get("truncated")) && result(history,0).get("stdout").toString().length()==4096,"Output limit is explicit");
             check(((Number)result(history,0).get("exitCode")).intValue()==7,"Parser keeps reading exit after output truncation");
-            long revision=((Number)history.page(0).get("revision")).longValue();
+            long revision=((Number)JdbcHistoryDatabase.fullPage(history,0).get("revision")).longValue();
             reply(first,4,shell(2,utf("RESULT_SEARCH_TOKEN\n")));
-            check(((Number)history.page(0).get("revision")).longValue()>revision,"Output-only changes advance refresh revision");
-            Map<String,Object> matches=history.page(Json.map("before",0,"epoch",history.page(0).get("epoch"),"filter","all","query","RESULT_SEARCH_TOKEN"));
+            check(((Number)JdbcHistoryDatabase.fullPage(history,0).get("revision")).longValue()>revision,"Output-only changes advance refresh revision");
+            Map<String,Object> matches=history.page(Json.map("before",0,"epoch",JdbcHistoryDatabase.fullPage(history,0).get("epoch"),"filter","all","query","RESULT_SEARCH_TOKEN"));
             check(((Number)matches.get("matchedCount")).intValue()==1,"Search includes results across retained records");
             check(Json.stringify(history.page(0)).getBytes(StandardCharsets.UTF_8).length<41000,"Result pages fit control response budget");
-            check(!Json.stringify(history.page(0)).contains("PRIVATE_APK_PAYLOAD"),"Install input is not logged");
+            check(!Json.stringify(JdbcHistoryDatabase.fullPage(history,0)).contains("PRIVATE_APK_PAYLOAD"),"Install input is not logged");
             first.close();second.close();
         }
-        try(AdbHistory history=new AdbHistory(dir)) {
-            check(Json.stringify(history.page(0)).contains("INSTALL_FAILED"),"Responses survive reload");
+        try(AdbHistory history=new AdbHistory(dir,JdbcHistoryDatabase::new)) {
+            check(Json.stringify(JdbcHistoryDatabase.fullPage(history,0)).contains("INSTALL_FAILED"),"Responses survive reload");
             AdbCommandObserver observer=history.parser("peer");open(observer,1,"shell:echo old");history.clear();reply(observer,1,utf("late-output"));
-            check(((Number)history.page(0).get("count")).intValue()==0,"Late response cannot resurrect cleared request");
+            check(((Number)JdbcHistoryDatabase.fullPage(history,0).get("count")).intValue()==0,"Late response cannot resurrect cleared request");
             open(observer,2,"shell,v2,pty:");reply(observer,2,shell(1,utf("private interactive echo")));
             open(observer,3,"exec:screencap -p");reply(observer,3,new byte[]{0,1,2,3});
-            check(!Json.stringify(history.page(0)).contains("private interactive echo"),"Interactive echo and binary known services excluded");
+            check(!Json.stringify(JdbcHistoryDatabase.fullPage(history,0)).contains("private interactive echo"),"Interactive echo and binary known services excluded");
             open(observer,4,"exec:cat /proc/info");reply(observer,4,new byte[]{0,1,2,3});
             check(Boolean.TRUE.equals(result(history,0).get("binary")) && result(history,0).get("stdout").equals(""),"Unexpected binary output is identified rather than rendered");
             observer.close();
         }
     }
     private static void files()throws Exception {
-        try(AdbHistory history=new AdbHistory(Files.createTempDirectory("usblink-sync-results-"))) {
+        try(AdbHistory history=new AdbHistory(Files.createTempDirectory("usblink-sync-results-"),JdbcHistoryDatabase::new)) {
             AdbCommandObserver observer=history.parser("peer");open(observer,1,"sync:");
             upload(observer,packet("WRTE",1,101,AdbHistoryTestMain.sync("SEND",utf("/data/local/tmp/app.apk,33188"))));
             reply(observer,1,AdbHistoryTestMain.sync("OKAY",new byte[0]));
             check("OKAY".equals(result(history,0).get("protocolStatus")),"Push acknowledgement matched to its path");
             upload(observer,packet("WRTE",1,101,AdbHistoryTestMain.sync("RECV",utf("/sdcard/test"))));
             reply(observer,1,AdbHistoryTestMain.join(AdbHistoryTestMain.sync("DATA",utf("PRIVATE_FILE_PAYLOAD")),AdbHistoryTestMain.sync("DONE",new byte[0])));
-            check("DONE".equals(result(history,0).get("protocolStatus")) && !Json.stringify(history.page(0)).contains("PRIVATE_FILE_PAYLOAD"),"Pull completion retained, file data skipped");
+            check("DONE".equals(result(history,0).get("protocolStatus")) && !Json.stringify(JdbcHistoryDatabase.fullPage(history,0)).contains("PRIVATE_FILE_PAYLOAD"),"Pull completion retained, file data skipped");
             upload(observer,packet("WRTE",1,101,AdbHistoryTestMain.sync("RECV",utf("/denied"))));
             reply(observer,1,AdbHistoryTestMain.sync("FAIL",utf("Permission denied")));
             check("FAIL".equals(result(history,0).get("protocolStatus")) && "Permission denied".equals(result(history,0).get("stderr")),"File failure text retained");
             upload(observer,packet("WRTE",1,101,AdbHistoryTestMain.sync("STAT",utf("/sdcard/test"))));
             reply(observer,1,ByteBuffer.allocate(16).order(ByteOrder.LITTLE_ENDIAN).put(utf("STAT")).putInt(33188).putInt(42).putInt(0).array());
-            check(result(history,0).get("stdout").toString().contains("size=42"),"File metadata result is readable");
+            check(((Number)history.page(0).get("count")).intValue()==3,"SYNC setup and STAT probes are not command history");
+            upload(observer,packet("WRTE",1,101,AdbHistoryTestMain.sync("SEND",utf("/sdcard/after-stat,33188"))));
+            reply(observer,1,AdbHistoryTestMain.sync("OKAY",new byte[0]));
+            check("OKAY".equals(result(history,0).get("protocolStatus")),"Skipping STAT history preserves following push response correlation");
             observer.close();
         }
     }
     private static void retention()throws Exception {
-        Path dir=Files.createTempDirectory("usblink-history-upgrade-");StringBuilder rows=new StringBuilder();
-        for(int i=1;i<=1000;i++)rows.append(Json.stringify(Json.map("id",i,"at",0,"peer","old","kind","shell","command","shell:echo "+i))).append('\n');
-        Files.writeString(dir.resolve("adb-history.jsonl"),rows);
-        try(AdbHistory history=new AdbHistory(dir)) {
-            check(((Number)history.page(0).get("count")).intValue()==1000 && ((Number)entry(history,0).get("id")).longValue()==1000,"Upgrade preserves all 1000 old rows");
-            check(((List<?>)history.page(0).get("entries")).size()==100 && (Boolean)history.page(0).get("hasMore"),"Default page contains 100 short records, with older history retained");
-            check(!entry(history,0).containsKey("response") && history.page(0).get("problem").equals(""),"Legacy history isn't called corrupt or given invented output");
+        Path dir=Files.createTempDirectory("usblink-history-sql-");
+        Files.writeString(dir.resolve("adb-history.jsonl"),"old JSON is not imported\n");
+        try(AdbHistory history=new AdbHistory(dir,JdbcHistoryDatabase::new)) {
+            check(((Number)history.page(0).get("count")).intValue()==0,"Legacy JSON is ignored");
+            java.util.function.Consumer<byte[]> observe=history.observe("peer");
+            for(int i=0;i<230;i++)observe.accept(AdbHistoryTestMain.packet("OPEN",i,AdbHistoryTestMain.utf("shell:echo "+i)));
+            check(((Number)history.page(0).get("count")).intValue()==200,"SQLite retains newest 200 rows");
+            check(((List<?>)history.page(0).get("entries")).size()==50 && (Boolean)history.page(0).get("hasMore"),"Default page contains 50 summaries");
         }
-        check(Files.readAllLines(dir.resolve("adb-history.jsonl")).size()==1000,"Opening and closing history does not trim it to one display page");
+        try(AdbHistory history=new AdbHistory(dir,JdbcHistoryDatabase::new)) {
+            check(((Number)history.page(0).get("count")).intValue()==200,"SQL rows persist across restart");
+        }
+        check(Files.readString(dir.resolve("adb-history.jsonl")).equals("old JSON is not imported\n"),"Old JSON is neither read nor rewritten");
     }
 }

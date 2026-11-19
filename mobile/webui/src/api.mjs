@@ -100,13 +100,13 @@ export function validateEnvironment(value) {
 
 function previewStatus(usb = false) {
   return {
-    version: usb ? '0.3.25-preview' : '0.2.15-preview', device: { model: 'Redmi K40', name: 'Redmi K40', modelCode: 'M2012K11AC', androidVersion: '12', sdk: 31, root: true },
+    version: usb ? '0.3.36-preview' : '0.2.21-preview', device: { model: 'Redmi K40', name: 'Redmi K40', modelCode: 'M2012K11AC', androidVersion: '12', sdk: 31, root: true },
     sharing: { enabled: false, active: false, state: 'off', problem: '' },
     debug: { mode: usb ? 'usb-adb-experimental' : 'system-tcp', enabled: false, connectAddress: '' },
     appSession: { ready: false, problem: '' },
     mesh: { configured: false, running: false, paused: true, localIp: '', networkName: '', peers: [], problem: '' },
     sessions: [], settings: { relay: 'tcp://183.230.36.171:11010' }, features: { externalUsb: false },
-    history: { entries: [], count: 0, epoch: 'preview', revision: 1, hasMore: false, limit: 1000, problem: '' },
+    history: { entries: [], count: 0, epoch: 'preview', revision: 1, hasMore: false, limit: 200, problem: '' },
   };
 }
 
@@ -122,7 +122,7 @@ export function createClient({ preview = false, scope = globalThis, usbPreview =
     ['shell', 'debug', 'logcat', 'shell,v2,raw:logcat -v threadtime'],
     ['service', 'device', 'reboot', 'reboot:bootloader'],
     ['service', 'network', 'transport', 'reverse:forward:tcp:8080;tcp:8080'],
-    ['service', 'other', 'service', 'unknown-service:example'],
+    ['shell', 'file', 'file-command', 'shell,v2,raw:ls /sdcard/Download'],
     ['shell', 'app', 'install', 'shell:pm install /data/local/tmp/older-release.apk'],
     ['shell', 'device', 'system-command', 'shell,v2,raw:getprop ro.product.model'],
   ];
@@ -143,9 +143,11 @@ export function createClient({ preview = false, scope = globalThis, usbPreview =
     const remaining = matching.filter(item => !before || item.id < before);
     const entries = []; let bytes = 0;
     for (const item of remaining) {
-      const size = new TextEncoder().encode(JSON.stringify(item)).length + 1;
+      const { stdout, stderr, note, ...response } = item.response || {};
+      const summary = { ...item, response: item.response ? response : undefined, partial: true, version: 1 };
+      const size = new TextEncoder().encode(JSON.stringify(summary)).length + 1;
       if (entries.length >= HISTORY_PAGE_SIZE || bytes + size > 40000) break;
-      entries.push(item); bytes += size;
+      entries.push(summary); bytes += size;
     }
     return { ...demo.history, entries, count: history.length, matchedCount: matching.length, filter, query, hasMore: remaining.length > entries.length };
   };
@@ -187,6 +189,12 @@ export function createClient({ preview = false, scope = globalThis, usbPreview =
       if (action === 'pairing-code') return { code: 'USBLink-DEMO-ONLY-NOT-A-REAL-PAIRING-CODE' };
       if (action === 'set-relay') demo.settings.relay = payload.relay;
       if (action === 'disconnect') demo.sessions = demo.sessions.filter(session => session.id !== payload.id);
+      if (action === 'history' && payload.id) {
+        if (payload.epoch !== demo.history.epoch) throw new Error('历史记录已更新');
+        const entry = history.find(item => item.id === payload.id);
+        if (!entry) throw new Error('记录已不存在');
+        return structuredClone({ epoch: demo.history.epoch, detail: true, entries: [{ ...entry, partial: false, version: 1 }], hasMore: false });
+      }
       if (action === 'history') { if (payload.epoch !== demo.history.epoch || !(payload.before >= 0)) throw new Error('历史记录已更新，请返回最新记录'); return structuredClone(historyPage(payload.before, payload.filter || 'all', (payload.query || '').trim())); }
       if (action === 'clear-history') { history = []; demo.history.epoch += '-cleared'; }
       demo.history = historyPage(0);

@@ -15,7 +15,7 @@ final class StatusSnapshot implements Closeable {
     private boolean closed;
     StatusSnapshot(Path directory,int pid,String startTicks,String boot,LongSupplier seconds)throws IOException {
         if(pid<=1 || !startTicks.matches("[0-9]+") || !boot.matches("[a-fA-F0-9-]{36}"))throw new IOException("状态进程身份无效");
-        file=directory.resolve("status.snapshot");identity=pid+" "+startTicks+" "+boot+" ";this.seconds=seconds;
+        file=StateLayout.runtimeFile(directory,"status.snapshot");identity=pid+" "+startTicks+" "+boot+" ";this.seconds=seconds;
         invalidate();
     }
     synchronized void publish(Map<String,Object> status)throws IOException {

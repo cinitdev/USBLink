@@ -14,6 +14,7 @@ final class TcpAdb {
         String property(String name) throws IOException;
         void tcpProperty(String value) throws IOException;
         void restart() throws IOException;
+        void stop() throws IOException;
         boolean listening(int port) throws IOException;
         boolean ownedListener(int port) throws IOException;
         void protect() throws IOException;
@@ -28,7 +29,7 @@ final class TcpAdb {
     private final Path journal;
     private final SystemAccess system;
     private long startDeadline;
-    TcpAdb(Path directory,SystemAccess system) {journal=directory.resolve("adbd-tcp.json");this.system=system;}
+    TcpAdb(Path directory,SystemAccess system) {journal=StateLayout.file(directory,"adbd-tcp.json");this.system=system;}
     synchronized void start() throws IOException {
         if(Files.exists(journal))throw new IOException("上次调试配置尚未恢复，请先关闭共享重试");
         system.requireAuthorization();
@@ -37,16 +38,26 @@ final class TcpAdb {
         if(!validProperty(original) || original.equals(String.valueOf(PORT)))throw new IOException("现有调试端口与模块冲突，已取消切换");
         if(!validProperty(persistent) || persistent.equals(String.valueOf(PORT)))throw new IOException("已有持久调试端口与模块冲突，已取消切换");
         if(!system.property("service.adb.listen_addrs").isEmpty())throw new IOException("系统已有自定义调试监听地址，已取消接管");
-        if(!system.property("init.svc.adbd").equals("running"))throw new IOException("请先在开发者选项开启 USB 调试，等待系统调试服务运行");
+        String originalService=system.property("init.svc.adbd");
+        if(originalService.equals("stopping") || originalService.equals("restarting"))
+            throw new IOException("USB 调试已开启，但系统 adbd 正在切换状态；请稍后重新开启共享");
+        if(!originalService.equals("running") && !originalService.equals("stopped"))
+            throw new IOException("USB 调试已开启，但无法确认系统 adbd 服务状态；请检查 ROM 的调试服务");
         if(system.listening(PORT))throw new IOException("模块内部端口已被占用，已取消切换");
-        save(Json.map("version",1,"boot",system.bootId(),"original",original,"persistent",persistent));
+        save(Json.map("version",2,"boot",system.bootId(),"original",original,"persistent",persistent,"originalService",originalService));
         // A crash at any following point leaves the record and restrictive rules for recovery.
         system.protect();system.verifyProtection();
         if(!original.equals(system.property("service.adb.tcp.port")) || !persistent.equals(system.property("persist.adb.tcp.port")) || !system.property("service.adb.listen_addrs").isEmpty())
             throw new IOException("调试配置已被其他程序修改，已取消切换");
+        if(!originalService.equals(system.property("init.svc.adbd")))throw new IOException("系统 adbd 状态在准备期间发生变化，已取消切换；请重新开启共享");
+        system.requireAuthorization();
         system.tcpProperty(String.valueOf(PORT));
         if(!String.valueOf(PORT).equals(system.property("service.adb.tcp.port")))throw new IOException("系统未接受调试端口配置");
-        system.restart();startDeadline=system.elapsed()+10_000;
+        // init's restart also starts a stopped service. Send exactly once, after
+        // authentication, the recovery journal and both firewall families are ready.
+        try{system.restart();}
+        catch(IOException e){throw new IOException("USB 调试已开启，但系统拒绝启动 adbd；请检查 ROM 或 Root 管理器限制");}
+        startDeadline=system.elapsed()+10_000;
     }
     synchronized int port() throws IOException {
         return port(false);
@@ -62,6 +73,9 @@ final class TcpAdb {
         if(maintain)system.maintainProtection();else system.verifyProtection();
         if(system.ownedListener(PORT))return PORT;
         if(system.elapsed()<startDeadline)return 0;
+        String service=system.property("init.svc.adbd");
+        if(service.equals("stopped"))throw new IOException("USB 调试已开启，但系统 adbd 启动后仍为停止状态；未自动重试，请检查 ROM 的调试服务限制");
+        if(service.equals("stopping") || service.equals("restarting"))throw new IOException("系统 adbd 持续处于停止或重启中，未建立共享监听；未自动重试");
         throw new IOException("系统 adbd 未建立预期监听，请关闭共享后检查 ROM 和 Root 权限");
     }
     synchronized void restore() throws IOException {
@@ -76,7 +90,9 @@ final class TcpAdb {
         } else {
             if(!system.property("service.adb.listen_addrs").isEmpty() || !system.property("persist.adb.tcp.port").equals(Json.string(entry,"persistent")) || (!current.equals(String.valueOf(PORT)) && !current.equals(original)))
                 throw new IOException("其他程序已修改调试配置，未覆盖其设置；端口防护仍保留，请恢复冲突后重试关闭");
-            if(current.equals(String.valueOf(PORT))) {
+            if("stopped".equals(entry.get("originalService"))) {
+                restoreStopped(entry,current,original);
+            } else if(current.equals(String.valueOf(PORT))) {
                 system.protect();
                 system.tcpProperty(original);
                 if(!original.equals(system.property("service.adb.tcp.port")))throw new IOException("原调试配置恢复失败，端口防护仍保留");
@@ -93,11 +109,32 @@ final class TcpAdb {
         system.unprotect();
         Files.delete(journal);startDeadline=0;
     }
+    private void restoreStopped(Map<String,Object> entry,String current,String original)throws IOException {
+        if(!current.equals(String.valueOf(PORT)) && !system.listening(PORT))return;
+        if(system.listening(PORT) && !system.ownedListener(PORT))throw new IOException("内部端口由其他进程占用，已停止恢复");
+        system.protect();
+        // Stop before restoring an empty port: restarting an initially stopped
+        // daemon with no USB transport could enable its default TCP listener.
+        if(!system.property("init.svc.adbd").equals("stopped") || system.listening(PORT))system.stop();
+        long deadline=system.elapsed()+8_000;
+        while((!system.property("init.svc.adbd").equals("stopped") || system.listening(PORT)) && system.elapsed()<deadline)system.pause();
+        if(!system.property("init.svc.adbd").equals("stopped") || system.listening(PORT))
+            throw new IOException("无法确认本次启动的 adbd 已停止，恢复记录与端口防护仍保留，请重试关闭");
+        String latest=system.property("service.adb.tcp.port");
+        if(!system.property("service.adb.listen_addrs").isEmpty() || !system.property("persist.adb.tcp.port").equals(Json.string(entry,"persistent")) || (!latest.equals(String.valueOf(PORT)) && !latest.equals(original)))
+            throw new IOException("停止期间调试配置已被其他程序修改，未覆盖其设置；请检查后重试关闭");
+        if(latest.equals(String.valueOf(PORT)))system.tcpProperty(original);
+        if(!system.property("service.adb.tcp.port").equals(original))throw new IOException("原调试配置恢复失败，端口防护仍保留");
+    }
     private Map<String,Object> read() throws IOException {
         try {
             if(Files.size(journal)>1024)throw new IllegalArgumentException();
             Map<String,Object> data=Json.object(Json.parse(new String(Files.readAllBytes(journal),StandardCharsets.UTF_8)));
-            if(Json.integer(data,"version")!=1 || !validProperty(Json.string(data,"persistent")) || !validProperty(Json.string(data,"original")) || Json.string(data,"original").equals(String.valueOf(PORT)) || !Json.string(data,"boot").matches("[a-fA-F0-9-]{36}"))throw new IllegalArgumentException();
+            long version=Json.integer(data,"version");
+            if(version!=1 && version!=2)throw new IllegalArgumentException();
+            if(version==1)data.remove("originalService"); // Old journals were written only for running services.
+            else if(!"running".equals(data.get("originalService")) && !"stopped".equals(data.get("originalService")))throw new IllegalArgumentException();
+            if(!validProperty(Json.string(data,"persistent")) || !validProperty(Json.string(data,"original")) || Json.string(data,"original").equals(String.valueOf(PORT)) || !Json.string(data,"boot").matches("[a-fA-F0-9-]{36}"))throw new IllegalArgumentException();
             return data;
         }catch(IllegalArgumentException e){throw new IOException("调试恢复记录损坏，已保留端口防护，请检查模块数据");}
     }

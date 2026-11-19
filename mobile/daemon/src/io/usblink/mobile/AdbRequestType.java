@@ -74,6 +74,30 @@ final class AdbRequestType {
         return request.substring(0,colon+1)+String.join(" ",args);
     }
     private static String quote(String value){return value.matches("[A-Za-z0-9_./:=,+@%-]+")?value:"'"+value.replace("'","'\"'\"'")+"'";}
+    // Only user-facing device commands enter history. Internal discovery, JDWP,
+    // SYNC channel setup and stat/list probes must not break command adjacency.
+    static String recordedCommand(String kind,String request) {
+        if(kind.equals("push") || kind.equals("pull"))return adbCommand(kind,request);
+        if(kind.equals("file") || kind.equals("sync") || kind.equals("unparsed"))return null;
+        int colon=request.indexOf(':');
+        if(colon<0)return null;
+        String service=request.substring(0,colon).split(",",2)[0];
+        if(Arrays.asList("shell","exec","abb","abb_exec","reboot","root","unroot","remount",
+                "disable-verity","enable-verity","tcpip","usb","backup","restore","bugreport").contains(service))
+            return adbCommand(kind,printable(request));
+        if(service.equals("reverse"))return reverseCommand(request.substring(colon+1));
+        return null;
+    }
+    private static String reverseCommand(String request) {
+        if(request.equals("list-forward"))return "adb reverse --list";
+        if(request.equals("killforward-all"))return "adb reverse --remove-all";
+        if(request.startsWith("killforward:"))return "adb reverse --remove "+quote(request.substring(12));
+        if(!request.startsWith("forward:"))return null;
+        String endpoints=request.substring(8),flags="";
+        if(endpoints.startsWith("norebind:")){flags="--no-rebind ";endpoints=endpoints.substring(9);}
+        String[] pair=endpoints.split(";",-1);
+        return pair.length==2 && !pair[0].isEmpty() && !pair[1].isEmpty()?"adb reverse "+flags+quote(pair[0])+" "+quote(pair[1]):null;
+    }
     static String adbCommand(String kind,String request) {
         if(kind.equals("push") || kind.equals("pull")) {
             int space=request.indexOf(' ');String path=quote(space<0?"":request.substring(space+1));
@@ -84,7 +108,8 @@ final class AdbRequestType {
         if(service.equals("shell"))return "adb shell"+(payload.isEmpty()?"":" "+payload);
         if(service.equals("exec"))return "adb exec-out "+payload;
         if(service.equals("abb") || service.equals("abb_exec"))return "adb shell cmd "+payload;
-        if(Arrays.asList("reboot","root","unroot","remount","disable-verity","enable-verity","tcpip","usb").contains(service))return "adb "+service+(payload.isEmpty()?"":" "+payload);
+        if(Arrays.asList("reboot","root","unroot","remount","disable-verity","enable-verity","tcpip","usb","backup","restore","bugreport").contains(service))return "adb "+service+(payload.isEmpty()?"":" "+payload);
+        if(service.equals("reverse")){String display=reverseCommand(payload);if(display!=null)return display;}
         return request;
     }
     // Bounded lexical inspection. Quoted text is one argument, never a command to execute.

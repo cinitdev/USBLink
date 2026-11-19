@@ -19,6 +19,8 @@ for(const scenario of ['ready','missing-parent','different-parent','replaced-par
   await fs.mkdir(path.join(temp,'state'));
   await fs.mkdir(path.join(temp,'dev'));
   const common=`STATE=${quote(state)}
+state_live() { printf '%s/%s\\n' "$STATE" "$1"; }
+state_file() { printf '%s/%s\\n' "$STATE" "$1"; }
 find_flock() { return 0; }
 lock_control() { return 0; }
 owned_record() {

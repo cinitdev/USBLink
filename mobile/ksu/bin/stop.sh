@@ -7,11 +7,11 @@ chmod 0700 "$STATE" || exit 1
 find_flock || exit 1
 exec 8>"$STATE/control.flock" || exit 1
 lock_control || { echo '启动操作仍在进行，停止尚未完成，请重试。' >&2; exit 1; }
-: > "$STATE/stopping" || exit 1
+: > "$(state_live stopping)" || exit 1
 failed=0
-stop_record "$STATE/supervisor.lock/pid" supervisor || failed=1
-stop_record "$STATE/daemon.pid" daemon || failed=1
-stop_record "$STATE/mesh.pid" mesh || failed=1
+stop_record "$(state_live supervisor.lock/pid)" supervisor || failed=1
+stop_record "$(state_live daemon.pid)" daemon || failed=1
+stop_record "$(state_live mesh.pid)" mesh || failed=1
 restore_adb || failed=1
 if [ "$failed" -eq 0 ]; then
   clear_route || failed=1
@@ -21,4 +21,4 @@ if [ "$failed" -ne 0 ]; then
   echo '无法确认所有共享进程或网络规则已清理，请重试停止。' >&2
   exit 1
 fi
-rm -f "$STATE/startup.error"
+rm -f "$(state_live startup.error)"

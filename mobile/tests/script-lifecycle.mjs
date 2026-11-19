@@ -161,12 +161,13 @@ check grep -Fxq -- "$STATE" "$FIXTURE/restore.log"
 check no restore_adb
 check test -f "$STATE/adbd-tcp.json"
 rm -f "$STATE/adbd-tcp.json" "$FIXTURE/restore-failure" "$FIXTURE/restore.log"
-: > "$STATE/adb-root-recovery.json"
+mkdir -p "$STATE/runtime"
+: > "$STATE/runtime/adbd-tcp.json"
 check restore_adb
 check grep -Fxq -- 'restore-adb' "$FIXTURE/restore.log"
-: > "$FIXTURE/restore-failure"
-check no restore_adb
-check test -f "$STATE/adb-root-recovery.json"
+rm -f "$STATE/runtime/adbd-tcp.json" "$FIXTURE/restore.log"
+rmdir "$STATE/runtime"
+rm -f "$STATE/runtime/adbd-tcp.json"
 
 mkdir -p "$FIXTURE/proc/sys/kernel/random"
 printf '%s\n' '11111111-1111-1111-1111-111111111111' > "$FIXTURE/proc/sys/kernel/random/boot_id"

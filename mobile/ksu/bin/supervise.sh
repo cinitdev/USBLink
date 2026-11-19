@@ -4,7 +4,7 @@ MODDIR=$1
 . "$MODDIR/bin/common.sh"
 mkdir -p "$STATE" || exit 1
 chmod 0700 "$STATE" || exit 1
-startup_error() { printf '%s\n' "$1" > "$STATE/startup.error"; echo "$1" >&2; }
+startup_error() { printf '%s\n' "$1" > "$(state_live startup.error)"; echo "$1" >&2; }
 find_flock || { startup_error '管理器缺少 BusyBox flock，请更新 Magisk / APatch / KernelSU。'; exit 1; }
 # Do not unlink these lock files: the kernel releases the locks even after SIGKILL/reboot.
 # The short control lock serializes start/stop; the lifetime lock excludes other supervisors.
@@ -13,13 +13,26 @@ lock_control || { startup_error '另一项启动或停止操作尚未完成，�
 exec 9>"$STATE/supervisor.flock" || exit 1
 # mksh otherwise closes descriptor 9 before executing the external BusyBox command.
 "$BUSYBOX" flock -n 9 9>&9 || exit 0
-LOCK=$STATE/supervisor.lock
+# Tidy the data directory while no module worker is alive. It always succeeds, so a
+# file that cannot be moved stays usable in place and never blocks startup.
+organize_state
+if [ -d "$STATE/runtime" ]; then LOCK=$STATE/runtime/supervisor.lock; else LOCK=$STATE/supervisor.lock; fi
 mkdir -p "$LOCK" || exit 1
 recover_runtime_records || { startup_error '后台运行记录损坏，尚不能安全恢复；请检查残留进程。'; exit 1; }
 # A supervisor from the old mkdir-lock implementation must not be disturbed.
 owned_record "$LOCK/pid" supervisor && exit 0
 write_record "$LOCK/pid" $$ || { startup_error '无法保存守护进程状态，启动已取消。'; exit 1; }
-rm -f "$STATE/stopping" "$STATE/startup.error"
+DAEMON_PID=$(state_live daemon.pid)
+MESH_PID=$(state_live mesh.pid)
+STOPPING=$(state_live stopping)
+ERROR_FILE=$(state_live startup.error)
+DAEMON_LOG=$(state_live daemon.log)
+PREV_LOG=$(state_live daemon.previous.log)
+# The module's own failures are JSON on stdout. ROM/JVM stack traces go to stderr
+# and are kept separately so daemon.log stays readable.
+DAEMON_ERR=${DAEMON_LOG%/*}/daemon.stderr.log
+PREV_ERR=${PREV_LOG%/*}/daemon.previous.stderr.log
+rm -f "$STOPPING" "$ERROR_FILE"
 child=
 finish() {
   trap '' TERM INT HUP
@@ -27,12 +40,12 @@ finish() {
   local candidate failed
   candidate=$child
   [ -n "$candidate" ] || candidate=$!
-  if [ ! -f "$STATE/daemon.pid" ] && [ -n "$candidate" ]; then
-    write_record "$STATE/daemon.pid" "$candidate" 2>/dev/null
+  if [ ! -f "$DAEMON_PID" ] && [ -n "$candidate" ]; then
+    write_record "$DAEMON_PID" "$candidate" 2>/dev/null
   fi
   failed=0
-  stop_record "$STATE/daemon.pid" daemon || failed=1
-  stop_record "$STATE/mesh.pid" mesh || failed=1
+  stop_record "$DAEMON_PID" daemon || failed=1
+  stop_record "$MESH_PID" mesh || failed=1
   restore_adb || failed=1
   if [ "$failed" -eq 0 ]; then
     clear_route || failed=1
@@ -44,29 +57,33 @@ finish() {
 }
 trap 'finish; exit $?' TERM INT HUP
 delay=2
-while [ -d "$MODDIR" ] && [ ! -f "$MODDIR/disable" ] && [ ! -f "$MODDIR/remove" ] && [ ! -f "$STATE/stopping" ]; do
-  stop_record "$STATE/daemon.pid" daemon && stop_record "$STATE/mesh.pid" mesh && clear_route || { finish; exit 1; }
+while [ -d "$MODDIR" ] && [ ! -f "$MODDIR/disable" ] && [ ! -f "$MODDIR/remove" ] && [ ! -f "$STOPPING" ]; do
+  stop_record "$DAEMON_PID" daemon && stop_record "$MESH_PID" mesh && clear_route || { finish; exit 1; }
   # Java also checks this journal before allowing sharing. Keep management available on failure.
   restore_adb || startup_error '系统调试配置尚未恢复，请在 WebUI 关闭共享重试。'
-  if [ -f "$STATE/daemon.log" ]; then mv -f "$STATE/daemon.log" "$STATE/daemon.previous.log"; fi
-  CLASSPATH="$MODDIR/lib/usblink-daemon.jar" /system/bin/app_process / --nice-name=usblink-mobile io.usblink.mobile.Main serve "$MODDIR" "$STATE" > "$STATE/daemon.log" 2>&1 8>&- 9>&- &
+  if [ -f "$DAEMON_LOG" ]; then mv -f "$DAEMON_LOG" "$PREV_LOG"; fi
+  if [ -f "$DAEMON_ERR" ]; then mv -f "$DAEMON_ERR" "$PREV_ERR"; fi
+  CLASSPATH="$MODDIR/lib/usblink-daemon.jar" /system/bin/app_process / --nice-name=usblink-mobile io.usblink.mobile.Main serve "$MODDIR" "$STATE" > "$DAEMON_LOG" 2> "$DAEMON_ERR" 8>&- 9>&- &
   child=$!
-  write_record "$STATE/daemon.pid" "$child" || { startup_error '无法保存后台进程状态，启动已取消。'; finish; exit 1; }
+  write_record "$DAEMON_PID" "$child" || { startup_error '无法保存后台进程状态，启动已取消。'; finish; exit 1; }
   exec 8>&-
   uptime=0
   # Start time, not kill -0 alone, prevents a recycled PID keeping this loop alive.
   while true; do
-    record_current "$STATE/daemon.pid"; current=$?
+    record_current "$DAEMON_PID"; current=$?
     [ "$current" -eq 1 ] && break
     [ "$current" -eq 2 ] && { startup_error '无法确认后台进程身份，自动启动已暂停。'; finish; exit 1; }
-    if [ ! -d "$MODDIR" ] || [ -f "$MODDIR/disable" ] || [ -f "$MODDIR/remove" ] || [ -f "$STATE/stopping" ]; then finish; exit $?; fi
+    if [ ! -d "$MODDIR" ] || [ -f "$MODDIR/disable" ] || [ -f "$MODDIR/remove" ] || [ -f "$STOPPING" ]; then finish; exit $?; fi
     sleep 2 9>&-
     uptime=$((uptime+2))
-    if [ "$((uptime % 30))" -eq 0 ] && [ -f "$STATE/daemon.log" ] && [ "$(wc -c < "$STATE/daemon.log")" -gt 65536 ]; then : > "$STATE/daemon.log"; fi
+    if [ "$((uptime % 30))" -eq 0 ]; then
+      if [ -f "$DAEMON_LOG" ] && [ "$(wc -c < "$DAEMON_LOG")" -gt 65536 ]; then : > "$DAEMON_LOG"; fi
+      if [ -f "$DAEMON_ERR" ] && [ "$(wc -c < "$DAEMON_ERR")" -gt 65536 ]; then : > "$DAEMON_ERR"; fi
+    fi
   done
   wait "$child" 2>/dev/null
   child=
-  stop_record "$STATE/daemon.pid" daemon && stop_record "$STATE/mesh.pid" mesh && clear_route || { finish; exit 1; }
+  stop_record "$DAEMON_PID" daemon && stop_record "$MESH_PID" mesh && clear_route || { finish; exit 1; }
   [ "$uptime" -ge 60 ] && delay=2
   sleep "$delay" 9>&-
   [ "$delay" -lt 60 ] && delay=$((delay*2))

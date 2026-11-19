@@ -1,4 +1,4 @@
-export const HISTORY_PAGE_SIZE = 100;
+export const HISTORY_PAGE_SIZE = 50;
 
 // A native response stays below the control channel's byte budget. Fill one
 // visible page across bounded reads without skipping long commands/results.
@@ -60,6 +60,12 @@ export function historyCommand(item) {
   if (service === 'exec') return 'adb exec-out ' + payload;
   if (service === 'abb' || service === 'abb_exec') return 'adb shell cmd ' + (payload.includes('\0') ? payload.replace(/\0+$/, '').split('\0').map(quote).join(' ') : payload);
   if (['reboot', 'root', 'unroot', 'remount', 'disable-verity', 'enable-verity', 'tcpip', 'usb'].includes(service)) return 'adb ' + service + (payload ? ' ' + payload : '');
+  if (service === 'reverse' && payload.startsWith('forward:')) {
+    let endpoints = payload.slice(8), flags = '';
+    if (endpoints.startsWith('norebind:')) { flags = '--no-rebind '; endpoints = endpoints.slice(9); }
+    const pair = endpoints.split(';');
+    if (pair.length === 2 && pair.every(Boolean)) return 'adb reverse ' + flags + pair.map(quote).join(' ');
+  }
   return raw;
 }
 export const historyCommandFamily = item => String(item.action || '').startsWith('install') ? 'adb install' : item.action === 'uninstall' ? 'adb uninstall' : '';

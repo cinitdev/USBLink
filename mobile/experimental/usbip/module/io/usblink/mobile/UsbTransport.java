@@ -54,7 +54,7 @@ final class UsbTransport implements SharingTransport {
                 public void close(){parser.close();}
             };
         },
-            peer->DesktopOwner.query(peer,3241,ownerKey));
+            (peer,local,clientPort,serverPort)->DesktopOwner.query(peer,local,3241,ownerKey,clientPort,serverPort));
         ip=bindIp;port=bindPort;targetPort=target;
     }
     public synchronized boolean active(String kind){return server!=null && server.active();}

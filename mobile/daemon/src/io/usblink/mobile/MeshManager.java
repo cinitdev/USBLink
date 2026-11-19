@@ -68,7 +68,7 @@ public final class MeshManager implements MeshNetwork {
         state=stateDir;module=moduleDir;
         Files.createDirectories(state);
         privateMode(state,true);
-        Path saved=state.resolve("mesh.json");
+        Path saved=StateLayout.file(state,"mesh.json");
         if(Files.exists(saved)) {
             if(Files.size(saved)>4096)throw new IOException("网络配置文件无效");
             privateMode(saved,false);
@@ -95,7 +95,7 @@ public final class MeshManager implements MeshNetwork {
         stop();
         if(process!=null && process.isAlive())throw new IOException("旧网络进程尚未退出，请稍后重试");
         if(route!=null)throw new IOException("旧网络规则尚未清理，请稍后重试");
-        writePrivate(state.resolve("mesh.json"),Json.stringify(replacement.json()));
+        writePrivate(StateLayout.file(state,"mesh.json"),Json.stringify(replacement.json()));
         profile=replacement;leaveRequested=false;enabled=resume;retryAt=0;delaySeconds=2;problem=enabled?"正在启动加密网络":null;
     }
     @Override public synchronized void setEnabled(boolean next) throws IOException {
@@ -117,7 +117,7 @@ public final class MeshManager implements MeshNetwork {
         stop();
         if(process!=null && process.isAlive()) {problem="退出连接未完成，旧网络进程尚未退出，请重试";throw new IOException(problem);}
         if(route!=null) {problem="退出连接未完成，旧网络规则尚未清理，请重试";throw new IOException(problem);}
-        try {Files.deleteIfExists(state.resolve("mesh.json"));Files.deleteIfExists(state.resolve("mesh.toml"));}
+        try {Files.deleteIfExists(StateLayout.file(state,"mesh.json"));Files.deleteIfExists(StateLayout.file(state,"mesh.toml"));}
         catch(IOException e) {problem="退出连接的配置删除失败，请检查数据目录后重试";throw new IOException(problem);}
         profile=null;problem="尚未创建或加入加密连接";
     }
@@ -132,7 +132,7 @@ public final class MeshManager implements MeshNetwork {
             if(process!=null) {process=null;retryAt=now+delaySeconds*1000L;delaySeconds=Math.min(60,delaySeconds*2);problem="加密网络进程已退出，正在等待恢复";}
             if(now<retryAt)return;
             try {
-                writePrivate(state.resolve("mesh.toml"),toml(profile,hostname));
+                writePrivate(StateLayout.file(state,"mesh.toml"),toml(profile,hostname));
                 process=processStarter.start(module);startedAt=now;problem="正在连接公共中继";
             }catch(IOException e) {retryAt=now+delaySeconds*1000L;delaySeconds=Math.min(60,delaySeconds*2);throw new IOException("加密网络启动失败，请检查模块组件和 Root 权限");}
             return;
@@ -235,7 +235,7 @@ public final class MeshManager implements MeshNetwork {
         boolean found=false;
         for(String line:rules.split("\\r?\\n")) {
             if(line.trim().startsWith("17891:")) {
-                Path record=state.resolve("mesh.route");
+                Path record=StateLayout.file(state,"mesh.route");
                 if(!exactRule(line,prefix) || !Files.exists(record) || Files.size(record)>64 ||
                     !new String(Files.readAllBytes(record),StandardCharsets.UTF_8).trim().equals(prefix))
                     throw new RouteCheckException("network_route_conflict","虚拟网络规则优先级或所有权记录冲突，共享已暂停");
@@ -245,7 +245,7 @@ public final class MeshManager implements MeshNetwork {
         if(found) {route=prefix;return;}
         // Android networking and VPN changes can remove a previously installed rule.
         // Reconcile actual rules on every tick, even while the interface/IP is unchanged.
-        writePrivate(state.resolve("mesh.route"),prefix);
+        writePrivate(StateLayout.file(state,"mesh.route"),prefix);
         route=prefix; // Retain the cleanup identity even if add or confirmation fails.
         // An add command can time out after the kernel has applied it. Submit once,
         // then confirm actual state; never add again just because its exit was uncertain.
@@ -294,7 +294,7 @@ public final class MeshManager implements MeshNetwork {
                 catch(IOException ignored) { /* A rule already removed by Android is also clean. Confirm below. */ }
                 String rules=command(1500,"/system/bin/ip","-4","rule","show");
                 for(String line:rules.split("\\r?\\n"))if(exactRule(line,route))return false;
-                Files.deleteIfExists(state.resolve("mesh.route"));route=null;
+                Files.deleteIfExists(StateLayout.file(state,"mesh.route"));route=null;
             }catch(IOException ignored) {return false;}
         }
         return true;

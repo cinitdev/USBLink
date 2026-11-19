@@ -41,6 +41,7 @@ final class AndroidPlatform implements Platform {
             public String property(String name)throws IOException{return command("/system/bin/getprop",name).trim();}
             public void tcpProperty(String value)throws IOException{command("/system/bin/setprop","service.adb.tcp.port",value);}
             public void restart()throws IOException{command("/system/bin/setprop","ctl.restart","adbd");}
+            public void stop()throws IOException{command("/system/bin/setprop","ctl.stop","adbd");}
             public boolean listening(int port)throws IOException{return !listenerInodes(port).isEmpty();}
             public boolean ownedListener(int port)throws IOException{return systemOwnsListener(port);}
             public void protect()throws IOException{try{firewall.install();}catch(IOException e){throw new IOException("无法建立 IPv4 / IPv6 调试端口防护，已取消共享");}}
