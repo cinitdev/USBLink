@@ -109,10 +109,44 @@ pub(crate) fn probe(host: &str) -> Health {
     )
 }
 
+// A network handover may drop one authenticated observation. Keep a manual
+// Connect pending while observing recovery; this never submits a USB command.
+pub(crate) fn probe_for_attach(host: &str) -> Health {
+    let start = std::time::Instant::now();
+    wait_for_application(|| probe(host), || start.elapsed(), std::thread::sleep)
+}
+
+fn wait_for_application(mut observe: impl FnMut() -> Health, now: impl Fn() -> Duration,
+    mut sleep: impl FnMut(Duration)) -> Health {
+    let deadline = now() + Duration::from_secs(6);
+    loop {
+        let result = observe();
+        if result.online || now() >= deadline { return result; }
+        sleep(Duration::from_millis(300).min(deadline.saturating_sub(now())));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::{io::Read, net::TcpListener, thread};
+
+    #[test]
+    fn manual_presence_waits_for_fresh_recovery_and_stops_on_unready_or_deadline() {
+        use std::cell::Cell;
+        let clock = Cell::new(Duration::ZERO);
+        let calls = Cell::new(0);
+        let result = wait_for_application(|| {
+            calls.set(calls.get() + 1);
+            classify(if calls.get() < 3 { None } else { Some(Phase::AndroidUsbReady) }, true)
+        }, || clock.get(), |delay| clock.set(clock.get() + delay));
+        assert!(result.usb_ready); assert_eq!(calls.get(), 3);
+        let result = wait_for_application(|| classify(None, true), || clock.get(), |delay| clock.set(clock.get() + delay));
+        assert!(!result.online && !result.usb_ready);
+        assert_eq!(clock.get(), Duration::from_millis(6600));
+        let result = wait_for_application(|| classify(Some(Phase::AndroidUsbFailed), true), || clock.get(), |_| panic!("Authenticated failure is surfaced immediately"));
+        assert!(result.online && !result.usb_ready);
+    }
 
     #[test]
     fn background_usb_service_does_not_keep_a_closed_application_online() {

@@ -7,10 +7,13 @@ use uuid::Uuid;
 
 pub(crate) const MAGIC: &[u8; 8] = b"USBLINK3";
 pub(crate) const OWNER_MAGIC: &[u8; 8] = b"USBLINK5";
+pub(crate) const TRANSPORT_MAGIC: &[u8; 8] = b"USBLINK6";
 const REQUEST: &[u8] = b"USBLink presence request v1\0";
 const RESPONSE: &[u8] = b"USBLink presence response v1\0";
 const OWNER_REQUEST: &[u8] = b"USBLink desktop owner request v1\0";
 const OWNER_RESPONSE: &[u8] = b"USBLink desktop owner response v1\0";
+const TRANSPORT_REQUEST: &[u8] = b"USBLink desktop transport request v1\0";
+const TRANSPORT_RESPONSE: &[u8] = b"USBLink desktop transport response v1\0";
 type Auth = Hmac<Sha256>;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -60,12 +63,47 @@ pub(crate) fn respond(
 // Process lifetime, not a hostname/IP or persisted profile identity. The single
 // instance lock prevents a replacement process becoming Ready before cleanup.
 pub(crate) fn respond_owner(stream: &mut TcpStream, key: &[u8; 32]) -> Result<(), String> {
-    static INSTANCE: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
     respond_payload(stream, key, OWNER_REQUEST, OWNER_RESPONSE, || {
-        let mut payload = INSTANCE.get_or_init(|| *Uuid::new_v4().as_bytes()).to_vec();
+        let mut payload = instance().to_vec();
         payload.push(Phase::current() as u8);
         payload
     })
+}
+
+fn instance() -> &'static [u8; 16] {
+    static INSTANCE: std::sync::OnceLock<[u8; 16]> = std::sync::OnceLock::new();
+    INSTANCE.get_or_init(|| *Uuid::new_v4().as_bytes())
+}
+
+// Authenticated, read-only observation of the original USB/IP TCP four-tuple.
+// The caller cannot nominate another phone/IP: addresses come from this stream.
+pub(crate) fn respond_transport(stream: &mut TcpStream, key: &[u8; 32]) -> Result<(), String> {
+    let local = stream.local_addr().map_err(|e| e.to_string())?;
+    let remote = stream.peer_addr().map_err(|e| e.to_string())?;
+    respond_transport_with(stream, key, |client_port, server_port| {
+        match (local, remote) {
+            (SocketAddr::V4(mut a), SocketAddr::V4(mut b)) if client_port != 0 && server_port == 3240 => {
+                a.set_port(client_port); b.set_port(server_port);
+                crate::transport_state::query(a, b)
+            }
+            _ => crate::transport_state::State::Unknown,
+        }
+    })
+}
+
+fn respond_transport_with(stream: &mut TcpStream, key: &[u8; 32],
+    observe: impl FnOnce(u16, u16) -> crate::transport_state::State) -> Result<(), String> {
+    let mut nonce = [0; 16]; let mut ports = [0; 4]; let mut tag = [0; 32];
+    stream.read_exact(&mut nonce).and_then(|_| stream.read_exact(&mut ports))
+        .and_then(|_| stream.read_exact(&mut tag)).map_err(|e| e.to_string())?;
+    authenticator(key, TRANSPORT_REQUEST, &nonce, &ports).verify_slice(&tag)
+        .map_err(|_| "传输状态请求认证失败".to_string())?;
+    let mut payload = instance().to_vec();
+    payload.push(Phase::current() as u8);
+    payload.push(observe(u16::from_be_bytes([ports[0],ports[1]]), u16::from_be_bytes([ports[2],ports[3]])) as u8);
+    let signed = [ports.as_slice(), payload.as_slice()].concat();
+    let tag = authenticator(key, TRANSPORT_RESPONSE, &nonce, &signed).finalize().into_bytes();
+    stream.write_all(&payload).and_then(|_| stream.write_all(&tag)).map_err(|e| e.to_string())
 }
 
 fn respond_payload(
@@ -256,6 +294,74 @@ mod tests {
             previous = Some(payload[..16].to_vec());
         }
         server.join().unwrap();
+    }
+
+    #[test]
+    fn transport_observation_is_authenticated_and_tuple_bound() {
+        let listener = TcpListener::bind(("127.0.0.1", 0)).unwrap();
+        let address = listener.local_addr().unwrap();
+        let server = std::thread::spawn(move || {
+            for request in 0..3 {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                let mut magic = [0;8]; stream.read_exact(&mut magic).unwrap();
+                assert_eq!(&magic, TRANSPORT_MAGIC);
+                let result = respond_transport_with(&mut stream, &[7;32], |client, server| {
+                    assert_eq!((client, server), (51001,3240));
+                    assert_eq!(request, 0, "Invalid requests must never query the OS");
+                    crate::transport_state::State::Gone
+                });
+                assert_eq!(result.is_ok(), request == 0);
+            }
+        });
+        for request in 0..3 {
+            let nonce = *Uuid::new_v4().as_bytes();
+            let key = if request == 1 { [8;32] } else { [7;32] };
+            let mut ports = [199,57,12,168];
+            let tag = authenticator(&key, TRANSPORT_REQUEST, &nonce, &ports).finalize().into_bytes();
+            if request == 2 { ports[0] ^= 1; }
+            let mut stream = TcpStream::connect(address).unwrap();
+            stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+            for data in [TRANSPORT_MAGIC.as_slice(), &nonce, &ports, &tag] { stream.write_all(data).unwrap(); }
+            let mut payload = [0;18];
+            if request > 0 { assert!(stream.read_exact(&mut payload).is_err()); continue; }
+            let mut tag = [0;32];stream.read_exact(&mut payload).unwrap();stream.read_exact(&mut tag).unwrap();
+            assert_eq!(payload[17], 2);
+            assert_eq!(&payload[..16], instance());
+            let signed = [ports.as_slice(),payload.as_slice()].concat();
+            assert!(authenticator(&key,TRANSPORT_RESPONSE,&nonce,&signed).verify_slice(&tag).is_ok());
+            assert!(authenticator(&key,TRANSPORT_RESPONSE,&[0;16],&signed).verify_slice(&tag).is_err());
+            let mut other = signed.clone();other[0]^=1;
+            assert!(authenticator(&key,TRANSPORT_RESPONSE,&nonce,&other).verify_slice(&tag).is_err());
+        }
+        server.join().unwrap();
+    }
+
+    #[test]
+    #[ignore = "requires compiled experimental module host classes"]
+    fn desktop_transport_java_interoperability() {
+        let listener = TcpListener::bind(("127.0.0.1",0)).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let server = std::thread::spawn(move || {
+            let deadline = std::time::Instant::now() + Duration::from_secs(8);
+            while std::time::Instant::now() < deadline {
+                if let Ok((mut stream,_)) = listener.accept() {
+                    stream.set_nonblocking(false).unwrap();stream.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+                    let mut magic = [0;8];stream.read_exact(&mut magic).unwrap();
+                    assert_eq!(&magic, TRANSPORT_MAGIC);
+                    return respond_transport(&mut stream, &[7;32]);
+                }
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            Err("Java did not connect".into())
+        });
+        let classes = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("../mobile/build/usb-module/test-classes");
+        let output = std::process::Command::new("java")
+            .args(["-cp",classes.to_str().unwrap(),"io.usblink.mobile.DesktopOwnerTestMain","--query-transport",&port.to_string()])
+            .output().unwrap();
+        server.join().unwrap().unwrap();
+        assert!(output.status.success(),"{}",String::from_utf8_lossy(&output.stderr));
     }
 
     #[test]

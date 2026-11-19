@@ -654,6 +654,14 @@ fn check_peer_health(peers: &mut [MeshPeer]) {
 }
 
 pub(crate) fn require_usb_peer(host: &str) -> Result<crate::peer_health::Health, String> {
+    require_usb_peer_with(host, crate::peer_health::probe)
+}
+
+pub(crate) fn wait_usb_peer(host: &str) -> Result<crate::peer_health::Health, String> {
+    require_usb_peer_with(host, crate::peer_health::probe_for_attach)
+}
+
+fn require_usb_peer_with(host: &str, observe: impl FnOnce(&str) -> crate::peer_health::Health) -> Result<crate::peer_health::Health, String> {
     if load_profile()?.is_none() {
         return Err("请先加入加密连接".into());
     }
@@ -661,7 +669,7 @@ pub(crate) fn require_usb_peer(host: &str) -> Result<crate::peer_health::Health,
     if !peers.iter().any(|peer| peer.ip == host) {
         return Err("对方电脑已离线或已离开当前连接，请等待对方上线".into());
     }
-    let health = crate::peer_health::probe(host);
+    let health = observe(host);
     if health.os == "android" && health.usb_kind != "android-adb-experimental" {
         return Err("手机模块提供 ADB 调试共享，不支持 USB/IP 设备挂载".into());
     }

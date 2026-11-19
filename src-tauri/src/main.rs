@@ -27,6 +27,7 @@ mod presence;
 mod process;
 mod services;
 mod sharing_session;
+mod transport_state;
 mod usb_origin;
 
 const CREATE_NO_WINDOW: u32 = 0x08000000;
@@ -847,7 +848,7 @@ fn attach_devices_blocking(
     let _guard = attach_lock()
         .lock()
         .map_err(|_| "USB 连接状态锁异常，请重新打开 USBLink".to_string())?;
-    let peer=mesh::require_usb_peer(&host)?;
+    let peer=mesh::wait_usb_peer(&host)?;
     let receipt = std::cell::RefCell::new(None);
     attachment::connect(
         &host,
@@ -857,7 +858,7 @@ fn attach_devices_blocking(
             if peer.usb_kind=="android-adb-experimental" {
                 attachment_preflight::prepare_android(&executable, &host, bus_id, &expected_vid_pids[bus_id], sharing_session::require_ready)?;
             } else {attachment_preflight::prepare(&executable, &host, bus_id, &expected_vid_pids[bus_id], sharing_session::require_ready)?;}
-            mesh::require_usb_peer(&host)?;
+            mesh::wait_usb_peer(&host)?;
             sharing_session::require_ready()?;
             // Another client action may have completed while the source settled.
             if connections::list_with_timeout(Duration::from_secs(3))?.iter().any(|device| device.matches(&host, bus_id)) {
