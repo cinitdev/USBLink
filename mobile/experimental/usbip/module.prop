@@ -1,6 +1,6 @@
 id=usblink-mobile
 name=USBLink Mobile · USB ADB
-version=0.3.25
-versionCode=325
+version=0.3.36
+versionCode=336
 author=一只小柒夏
-description=手机 USB ADB 共享 · Android 12+ arm64 · 历史保留 1000 条、每页显示 100 条 · Magisk / APatch / KernelSU · 不支持 MTP / OTG
+description=手机 USB ADB 共享 · Android 12+ arm64 · 数据分目录、整理不阻断启动 · 日志分离、版本取自 module.prop · SQLite 历史 200 条、每页 50 条 · Magisk / APatch / KernelSU · 不支持 MTP / OTG

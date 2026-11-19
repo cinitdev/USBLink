@@ -2,17 +2,19 @@
 
 USBLink 是一个中文 Windows 桌面工具，为免费的 USB/IP 组件提供图形界面。它内置 EasyTier 加密组网，可以共享和连接任意数量的 USB 设备，不需要账号或命令行。
 
-当前正式发布：**Windows 0.3.19 + Android 模块 0.3.25**。下载：[v0.3.19 发布页](https://github.com/cinitdev/USBLink/releases/tag/v0.3.19)。完整变更见 [发布说明](RELEASE_NOTES.md) 和 [更新日志](CHANGELOG.md)。发布标签沿用 Windows 版本号，手机模块使用独立版本号。
+当前正式发布：**Windows 0.3.21 + Android 模块 0.3.36**，见 [GitHub 正式发布页](https://github.com/cinitdev/USBLink/releases/tag/v0.3.21)。完整变更见 [更新日志](CHANGELOG.md)。发布标签沿用 Windows 版本号，手机模块使用独立版本号。
 
-本次发布汇总 v0.3.12 以来的更新：桌面连接页重写为可搜索、就地展开的单列来源列表，统一两端 AppOpt 蓝白／藏蓝风格，修复旧地址残留，补齐配对码显示／复制／隐藏。模块修复共享／网络启动期间 WebUI 切页卡顿，历史详情按需渲染；历史保留最新 1000 条，每页默认显示 100 条，记录对应手机返回、标准错误及可用退出码，每条返回最多 4096 字节并标注截断。两端配合释放桌面更新后旧 USB 会话。新版模块包为 `USBLink-Mobile-0.3.25-usb-adb-arm64.zip`，名称、WebUI 和安装包移除实验标识。
+本次发布包含 Windows 连接页和多来源设备交互改进，以及 Android 模块的 SQLite 命令历史、记录筛选和连续去重、状态及启动稳定性修复。Windows 与手机模块共同修复断流后旧会话残留，并改进 VPN 分流下的反向在线检测。模块包为 `USBLink-Mobile-0.3.36-usb-adb-arm64.zip`；完整细节和限制见更新日志与发行说明。
 
 Windows 连接页新增可搜索的同网设备列表，可保留多个手机／电脑来源的 USB 连接；切换查看无需退出网络或重新输入配对码，不设置成员或共享数量上限。所有成员使用同一个配对码，原先分别组网的设备只需调整一次。验证范围见 [多设备连接验证](docs/multi-network-0.3.12-validation.md)。
 
 ## Android 手机模块（USB ADB）
 
+当前正式版本：Windows **0.3.21**、手机模块 **0.3.36**。修复 Android VPN 分流环境下模块回连电脑误走代理网卡的问题，检测连接绑定原 USB/IP 会话的 USBLink 本地地址；电脑手动连接时短暂在线探测失败会继续只读等待 6 秒。仍需用户点击连接一次，不会自动挂载或重复 attach。配对、共享偏好和旧会话保护规则不变。
+
 [USBLink Mobile](mobile/README.md) 作者为 **一只小柒夏**，要求 **Android 12+（API 31+）、ARM64、Root**。同一个 ZIP 支持 Magisk、APatch 和 KernelSU；Magisk 20.4+ 用户自行安装并授权 [KsuWebUI](https://github.com/KOWX712/KsuWebUIStandalone)，其他两种管理器可直接打开 WebUI。模块为 DEX JAR + app_process，没有独立 USBLink APK。
 
-当前模块 **0.3.25** 包含后台同步切页优化、请求与手机返回记录、WebUI 首次点击共享修复，并已删除 adbd Root 运行模式及其实现，保留普通共享、USB 调试检测和本机 WebUI Shell Root 检测。旧版升级后重启一次以清除旧进程和临时挂载，配对保留，历史保留最新 1000 条，每页默认显示 100 条。不会补造电脑端不可见的原始命令参数或旧记录输出。
+模块 **0.3.36** 使用 SQLite 保留最近 200 条 ADB 命令历史，默认每页显示 50 条；筛选内部探测，只对相邻重复命令保留首条及其结果。ADB 返回按协议可观测内容保存。升级保留配对、共享设置和有效 SQLite 历史，不读取旧 JSON 历史。
 
 保留损坏运行记录的启动恢复、网络查询／路由误断开、端口复用和双向传输修复。关闭共享会断开网络，保留配对码；再次开启连接原网络，重启遵循保存的开关。减少了关闭状态的后台活动，但没有实际电量测量。
 
@@ -22,15 +24,15 @@ Windows 连接页新增可搜索的同网设备列表，可保留多个手机／
 
 桌面更新会话修复需要两端都更新。模块通过配对认证确认原桌面进程正在退出，或新桌面进程已完成启动清理，才释放对应旧会话。强制结束且尚未重新启动桌面时，连接可能暂时仍显示；网络超时本身不作为踢掉设备的证据。新版启动就绪后会清理已确认的旧占用，点击连接仍只提交一次挂载。验证边界见 [更新会话修复](docs/upgrade-session-0.3.19.md)。
 
-模块数据位于 `/data/adb/usblink/`。本次复用各次改动的定向检查，重新构建 Windows 安装器并核对两个发行文件，没有再次刷入真机或重复运行全套测试；新包的各 ROM／管理器组合、跨网络安装与多手机长期传输仍需实测。见 [发布验证](docs/release-v0.3.19-validation.md)。
+模块数据位于 `/data/adb/usblink/`。本次检查复用各项定向测试与构建结果，确认 Windows 安装包和手机模块版本及 SHA-256；未将新版刷入 K70，也未复现断网过程。不能据此保证所有代理核心和自定义路由规则，见 [Windows 验证记录](docs/network-session-0.3.21-validation.md) 与 [手机验证记录](mobile/experimental/usbip/MODULE.md)。
 
 手机仅提供 **Android ADB Interface**，不支持 MTP 便携设备、资源管理器浏览手机存储、Fastboot、U 盘或外接手机共享。用户已在骁龙和天玑手机上测试可用（2026-11-09 反馈），0.3.25 起不再使用实验标识。要求 Android 12+、ARM64、Root，具体 ROM／管理器组合以实测为准。
 
 ## Windows 安装程序
 
-本次配套安装文件为 `USBLink-0.3.19-x64-Setup.exe` 和 `USBLink-Mobile-0.3.25-usb-adb-arm64.zip`。Windows 0.3.11 起可连接模块；更新后旧会话释放需要 Windows 0.3.19 与新版模块配合，建议两端一起更新。本次不分发 TCP 开发 ZIP。
+本次配套安装文件为 `USBLink-0.3.21-x64-Setup.exe` 和 `USBLink-Mobile-0.3.36-usb-adb-arm64.zip`。断流后的旧会话释放需要新版两端配合，建议一起更新。本次不分发 TCP 开发 ZIP。
 
-从 [本次发布页](https://github.com/cinitdev/USBLink/releases/tag/v0.3.19) 下载 Windows x64 的 `Setup.exe` 安装包。双击打开中文安装向导，选择安装目录后完成安装；可创建开始菜单和桌面快捷方式，也可以从 Windows“设置 → 应用”中卸载。默认安装到当前用户目录。发布页附有 SHA-256 校验文件。
+从 [本次发布页](https://github.com/cinitdev/USBLink/releases/tag/v0.3.21) 下载 Windows x64 的 `Setup.exe` 安装包。双击打开中文安装向导，选择安装目录后完成安装；可创建开始菜单和桌面快捷方式，也可以从 Windows“设置 → 应用”中卸载。默认安装到当前用户目录。发布页附有 SHA-256 校验文件。
 
 安装包会检查 WebView2，缺失时联网下载并安装。USB 驱动仍通过应用“设置”页安装；EasyTier 和许可证已包含在程序及安装资源中。已开启的开机启动项会指向新的安装路径。
 
@@ -113,7 +115,7 @@ cargo test --manifest-path src-tauri\Cargo.toml
 npm run tauri:build
 ```
 
-默认构建会生成 NSIS 安装包：`src-tauri\target\release\bundle\nsis\USBLink_0.3.19_x64-setup.exe`。安装器配置位于 `src-tauri/tauri.conf.json`，升级/卸载检查位于 `src-tauri/installer-hooks.nsh`，自定义模板来源及验证步骤见 [安装器维护说明](src-tauri/INSTALLER.md)。
+默认构建会生成 NSIS 安装包：`src-tauri\target\release\bundle\nsis\USBLink_0.3.21_x64-setup.exe`。安装器配置位于 `src-tauri/tauri.conf.json`，升级/卸载检查位于 `src-tauri/installer-hooks.nsh`，自定义模板来源及验证步骤见 [安装器维护说明](src-tauri/INSTALLER.md)。
 
 在没有运行中的 USBLink、没有现有安装和同名快捷方式的测试账户中，可以运行 `tests/installer-smoke.ps1` 验证静默安装、覆盖安装、文件校验、快捷方式、卸载注册及卸载后保留用户文件；脚本不启动应用，并恢复测试前的开机启动项。
 

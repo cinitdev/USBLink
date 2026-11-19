@@ -1,6 +1,18 @@
 # USBLink Mobile
 
-当前正式发布 USB ADB 模块 **0.3.25**，随仓库 [v0.3.19](https://github.com/cinitdev/USBLink/releases/tag/v0.3.19) 与 Windows **0.3.19** 一起发布。修复共享／网络启动时 WebUI 切页卡顿，支持的宿主改用原生后台调用，历史输出按需展开并减少重复渲染。历史保留最近 **1000 条**，默认每页显示 **100 条**，包含与请求对应的手机返回文本、标准错误、可用退出码及文件操作协议结果；每条返回合计最多 **4096 字节**，超出标注截断，可搜索返回内容。升级保留最新旧记录，但不补造旧输出或手机端不可见的电脑参数。保留两端配合释放更新后旧会话、USB 调试检测、WebUI 控制 Shell Root 检测和首次点击共享修复；adbd Root 运行模式已删除。默认 TCP 开发源码为 0.2.15，本次仅分发 USB ADB ZIP。建议两端一起更新；单独的 WebUI 卡顿修复无需桌面配合。验证见 [发布验证](../docs/release-v0.3.19-validation.md)。
+0.3.36 修复 Android VPN 分流时模块反向检测电脑误走代理网卡。手机现在绑定旧 USB/IP 入站 socket 的本地 USBLink 地址后再做认证查询，让断流的旧会话可被正确核实和释放。需要与 Windows 0.3.21 一起更新；电脑手动连接时短暂在线探测失败会继续只读等待 6 秒。没有自动挂载或重复 attach。此前旧会话修复及保护规则见 [定向验证](../docs/network-session-0.3.20-validation.md)。
+
+当前正式版本 **USB 0.3.36 / TCP 0.2.21**：SQLite 最多保留 **200 条**、每页 **50 条**。仅记录实际 ADB 命令，过滤 track-app、sync 通道、JDWP 和文件探测。按同一电脑实际发送的命令和参数去重，忽略 shell／shell,v2 等协议包装，连续重复只保留第一条及返回，后台协议不打断连续性。已有 SQLite 数据库按新规则整理，旧 JSON 不读取、不导入。列表读取摘要，展开再查询详情。数据库为 `/data/adb/usblink/history/adb-history.db`；配对与共享偏好不变，本版断流会话修复需要电脑更新到 0.3.21。正式发布见 [GitHub v0.3.21](https://github.com/cinitdev/USBLink/releases/tag/v0.3.21)。
+
+0.3.34 把守护进程的 stdout 与 stderr 分开：`logs/daemon.log` 只留模块自己的 JSON 错误，MIUI 等在打开 SQLite 时打印的框架堆栈改到 `logs/daemon.stderr.log`（另有 `daemon.previous.stderr.log`），两边都按 64 KiB 截断。状态里的模块版本改为读取 `module.prop`，不再写死。
+
+0.3.31 在真我 GT5／Android 16 上确认 SQLite 默认同步模式读取抛出空指针。打开数据库时明确指定 WAL 和 FULL 后，同机隔离数据库的初始化、命令／返回保存、连续去重和重开持久化均通过；不删除或归档原历史。未重启共享或替换真机运行模块，详见 [验证记录](docs/history-android-0.3.31-validation.md)。
+
+0.3.30 修复 USB 调试已开启、但系统 adbd 已停止时无法开启共享的问题：先建立端口防护，再请求一次启动并等待实际监听；关闭时恢复原服务状态。正在切换或未知状态给出对应错误，不再提示调试开关未开启。未在反馈的真我 GT5／Android 16 真机验证，详见 [验证记录](docs/adbd-start-0.3.30-validation.md)。
+
+0.3.29 修复历史脱敏误判：普通 `usblink-` 文件名、路径和网络名正常记录，只隐藏 `USBLINK1-` 配对码及明确的凭据字段。旧记录已替换的原文不能恢复，修复对新记录生效。
+
+0.3.36 与 Windows **0.3.21** 一起正式发布。除本页开头的 SQLite 历史与断流修复外，保留共享期间 WebUI 切页优化、USB 调试检测和本地 WebUI Shell Root 检测；adbd Root 运行模式已删除。默认 TCP 开发源码为 0.2.21，本次仅分发 USB ADB ZIP。建议两端一起更新。验证边界见 [Windows 验证记录](../docs/network-session-0.3.21-validation.md) 和本页下方各模块记录。
 
 从旧版升级后请重启手机一次，让旧进程和临时挂载退出；配对、共享偏好和历史保留。旧 Root 配置文件不再读取。日常共享启停仍无需重启手机。下方版本条目是历史记录，不代表已移除功能仍可使用。
 
@@ -10,7 +22,19 @@
 
 ## 0.3.12：损坏运行记录的启动恢复
 
-模块数据在 `/data/adb/usblink/`。进程记录损坏时，持有启动锁并确认无模块进程后，备份并移走损坏记录，保留配对、共享偏好、历史与恢复日志。相关脚本已在 K40 / Android 12 上确认恢复服务；完整 ZIP 尚未重新刷入测试。
+模块数据按用途存放，根目录只保留三份互斥锁和 `backups/`：
+
+| 目录 | 内容 |
+| --- | --- |
+| `config/` | `mesh.json`（配对）、`sharing.json`（共享开关） |
+| `history/` | `adb-history.db` 及 SQLite 的 `-wal`／`-shm`／`-journal` |
+| `runtime/` | `adbd-tcp.json`、`mesh.toml`、`mesh.route`、进程记录、状态快照、`stopping`、`supervisor.lock/pid` |
+| `logs/` | 当前／上一份日志与启动错误；守护进程的框架堆栈单独放在 `daemon.stderr.log` |
+| `backups/` | 旧 JSON 归档（`legacy/`）、运行记录修复备份，保留不删 |
+
+启动时的整理**不是**启动条件：没有模块进程时才尝试，文件能搬就搬；搬不动就留在原处继续用，本次启动照常完成，也不会写 `startup.error`。旧位置和新位置都有同一文件且内容不同时，保留上一版实际使用的根目录文件为当前数据，把旧的归档到 `backups/legacy`；内容相同才删除旧副本。配对、共享偏好、历史和恢复记录不会被隐藏。SQLite 数据库与配套文件作为一组处理，打开前若发现分处两个目录会先合并。旧 JSON 历史只归档、不读取、不导入。
+
+0.3.32 的修复范围见 [更新日志](../CHANGELOG.md)。
 
 ## 0.3.11：路由检查误断开修复
 
@@ -24,7 +48,7 @@
 
 ## 0.3.9：Magisk / APatch / KernelSU
 
-- 三种管理器安装同一个 ZIP，当前为 `USBLink-Mobile-0.3.25-usb-adb-arm64.zip`，无需按 Root 类型分别下载。Magisk 要求 20.4+；所有管理器均要求 Android 12+、ARM64。
+- 三种管理器安装同一个 ZIP，当前为 `USBLink-Mobile-0.3.36-usb-adb-arm64.zip`，无需按 Root 类型分别下载。Magisk 要求 20.4+；所有管理器均要求 Android 12+、ARM64。
 - **Magisk**：在 Magisk 模块页安装 ZIP，按管理器提示完成首次重启；自行安装 [KsuWebUI](https://github.com/KOWX712/KsuWebUIStandalone)，授予它 Root 权限，打开后选择 USBLink。Magisk 官方没有内置 WebUI，模块“操作”按钮用于启动／检查后台，随后在 KsuWebUI 打开界面。
 - **APatch / KernelSU**：安装 ZIP 后按管理器提示完成更新，在模块 WebUI 打开；也可使用已获 Root 授权的 KsuWebUI。
 - 后台使用对应管理器自带的 BusyBox，Magisk 新增 `/data/adb/magisk/busybox` 路径；找不到 `flock` 时仍拒绝无锁启动。关闭界面不会停止共享服务，模块禁用／卸载仍执行原清理流程。
@@ -56,9 +80,9 @@
 
 空闲时停止 EasyTier 查询及重复的调试恢复，后台观察改为每 5 秒；共享时每 2 秒的防护检查保持。WebUI 隐藏时暂停前端轮询，状态仍验证进程身份和 10 秒时效。没有真机电池测量，因此只能确认减少了后台活动，不能承诺具体耗电百分比。
 
-## 当前发布：USB ADB 模块 0.3.25
+## 当前发布：USB ADB 模块 0.3.36
 
-下载：[Windows 0.3.19 + Mobile 0.3.25 正式发布版](https://github.com/cinitdev/USBLink/releases/tag/v0.3.19)。手机安装 `USBLink-Mobile-0.3.25-usb-adb-arm64.zip`，电脑安装 `USBLink-0.3.19-x64-Setup.exe`。Windows 0.3.11 起可连接模块，更新后旧会话释放需新版两端配合。模块名称与安装包不再包含实验标识。
+下载：[Windows 0.3.21 + Mobile 0.3.36 正式发布版](https://github.com/cinitdev/USBLink/releases/tag/v0.3.21)。手机安装 `USBLink-Mobile-0.3.36-usb-adb-arm64.zip`，电脑安装 `USBLink-0.3.21-x64-Setup.exe`。断流后旧会话释放需新版两端配合。模块名称与安装包不再包含实验标识。
 
 1. 在 Magisk／APatch／KernelSU 模块页覆盖安装 ZIP，按管理器提示完成更新并重启一次，清除旧进程及可能遗留的临时挂载。同一 USB 通道的组网配置、共享开关及历史会保留；从旧 TCP 模块升级时不会自动开启新 USB 通道。
 2. 手机开发者选项开启普通 **USB 调试**，不需要无线调试，也不要求手机接到另一台电脑上。
@@ -69,11 +93,11 @@
 
 模块显示手机系统提供的市场名称，再回退设备名称或原型号，不使用机型表。WebUI 使用蓝白／藏蓝配色，后台静默同步状态，保留正在编辑的表单；从后台返回立即读取新状态。
 
-此版本只有 Android ADB Interface，**没有 MTP 便携存储、Fastboot、外接 U 盘或外接手机共享**。此前独立试验已在 Redmi K40／Android 12／APatch 验证驱动、认证、64 MiB 双向传输和清理。用户于 2026-11-09 反馈已在骁龙和天玑手机上测试可用。本次发布核对构建、内容和校验和，未再次刷入手机；这些结果不等同于新包在所有 ROM／管理器上的完整验收。见 [模块说明](experimental/usbip/MODULE.md) 与 [发布验证](../docs/release-v0.3.19-validation.md)。
+此版本只有 Android ADB Interface，**没有 MTP 便携存储、Fastboot、外接 U 盘或外接手机共享**。此前独立试验已在 Redmi K40／Android 12／APatch 验证驱动、认证、64 MiB 双向传输和清理。用户于 2026-11-09 反馈已在骁龙和天玑手机上测试可用。本次发布未将新版刷入 K70，也未复现断网过程；这些结果不等同于新包在所有 ROM／管理器、代理核心与路由配置上的完整验收。见 [模块说明](experimental/usbip/MODULE.md) 和 [网络会话验证](../docs/network-session-0.3.21-validation.md)。
 
 ## 旧 TCP 模块（开发兼容路径）
 
-以下说明仅适用于默认 TCP 构建，不是本次 USB ADB ZIP 使用步骤。当前源码版本为 0.2.15（本次不分发 TCP ZIP），共享开关同样控制网络；已发布历史文档中的 0.2.2 关闭后在线行为不再适用。
+以下说明仅适用于默认 TCP 构建，不是本次 USB ADB ZIP 使用步骤。当前源码版本为 0.2.21（本次不分发 TCP ZIP），共享开关同样控制网络；已发布历史文档中的 0.2.2 关闭后在线行为不再适用。
 
 本版共享手机自己的 **系统 adbd TCP 调试**，经 EasyTier 加密网络连接电脑现有 ADB / Android Studio。已移除系统无线调试的 TLS 配对通道、mDNS 发现、配对窗口与手动端口。**不需要开启无线调试，不需要 USB 线**。
 
@@ -117,7 +141,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File mobile/scripts/fetch-easytie
 powershell -NoProfile -ExecutionPolicy Bypass -File mobile/scripts/build.ps1 -UsbAdb
 ```
 
-构建产物：`release/USBLink-Mobile-0.3.25-usb-adb-arm64.zip`，同目录生成 SHA256 文件。构建会执行管理器安装／BusyBox 发现、核心、组网、网络观察故障、名称、认证、TCP 恢复/防护、重启准备、ADB 历史及返回解析、USB/IP 协议、模块集成、桌面进程交接和 WebUI 测试，然后编译 DEX 与网页。不带 `-UsbAdb` 时生成 TCP 0.2.15 模块；旧参数 `-ExperimentalUsb` 作为别名兼容。
+构建产物：`release/USBLink-Mobile-0.3.36-usb-adb-arm64.zip`，同目录生成 SHA256 文件。构建会执行管理器安装／BusyBox 发现、核心、组网、网络观察故障、名称、认证、TCP 恢复/防护、重启准备、ADB 历史及返回解析、USB/IP 协议、模块集成、桌面进程交接和 WebUI 测试，然后编译 DEX 与网页。不带 `-UsbAdb` 时生成 TCP 0.2.21 模块；旧参数 `-ExperimentalUsb` 作为别名兼容。
 
 安装 Git Bash 后可运行脚本模拟测试：
 
@@ -128,6 +152,6 @@ node mobile/tests/action-lifecycle.mjs
 node mobile/tests/root-managers.mjs
 ```
 
-这些测试只使用夹具，不操作真实手机、路由或防火墙。浏览器交互预览仅在显式 `?preview=1` 时启用，并标明示例数据；生产环境缺少管理器桥接会显示不可用。
+历史主机检查使用真实 SQLite JDBC（固定版本及 SHA-256，缓存在 mobile/build/test-libs），仅供测试，不打包到手机；手机使用 Android 内置 SQLite。其余测试使用夹具，不操作真实手机、路由或防火墙。浏览器交互预览仅在显式 `?preview=1` 时启用，并标明示例数据；生产环境缺少管理器桥接会显示不可用。
 
 EasyTier 2.6.4 官方 ARM64 文件保持未修改，附 LGPL / GPL 全文、源码链接与 SHA256 清单，见 `vendor/easytier/NOTICE.md`。
